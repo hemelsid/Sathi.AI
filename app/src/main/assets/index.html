@@ -154,9 +154,9 @@ textarea{width:100%;resize:none;border:0;background:transparent;color:var(--ink)
     <div class="help">ফ্রি key পেতে: aistudio.google.com → Get API key। <a href="#" id="aiLink">এখানে চাপুন</a></div>
     <label for="model">মডেল</label>
     <select id="model">
-      <option value="gemini-flash-latest">Gemini Flash (প্রস্তাবিত)</option>
-      <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-      <option value="gemini-2.5-flash-lite">Gemini Flash-Lite (দ্রুত, বেশি লিমিট)</option>
+      <option value="auto">স্বয়ংক্রিয় (প্রস্তাবিত)</option>
+      <option value="gemini-flash-latest">Gemini Flash (সর্বশেষ)</option>
+      <option value="gemini-flash-lite-latest">Gemini Flash-Lite (দ্রুত, বেশি লিমিট)</option>
       <option value="gemini-pro-latest">Gemini Pro (ফ্রিতে নাও চলতে পারে)</option>
     </select>
     <label for="about">আপনার সম্পর্কে (সাথী মনে রাখবে)</label>
@@ -185,7 +185,8 @@ function pref(k, v){
   if (v === undefined){ try { return A ? A.getPref(k) : (localStorage.getItem("p_" + k) || ""); } catch(e){ return ""; } }
   try { A ? A.setPref(k, v) : localStorage.setItem("p_" + k, v); } catch(e){}
 }
-function cfg(){ return { key: pref("api_key"), model: pref("model") || "gemini-flash-latest", about: pref("about"),
+function cfg(){ var _m = pref("model"); if (/^gemini-2\.5|^gemini-2\.0/.test(_m)) pref("model", "auto");
+   return { key: pref("api_key"), model: pref("model") || "auto", about: pref("about"),
   confirm: pref("confirm") !== "0", speak: pref("auto_speak") === "1" }; }
 function loadConvs(){ try { convs = JSON.parse(localStorage.getItem("convs") || "[]"); } catch(e){ convs = []; } }
 function stripBig(h){
@@ -455,34 +456,83 @@ function systemPrompt(){
     c.about ? "About the user (remember and personalise): " + c.about : ""
   ].join("\n");
 }
-async function gemini(body, model){
+/* ---- model selection: never hard-depend on one model name ---- */
+var PREFERRED = ["gemini-flash-latest", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash-preview",
+                 "gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-2.5-flash-lite"];
+var BAD = {};            // models that failed this session
+var listed = null;       // models Google says this key can use
+async function listModels(key){
+  if (listed) return listed;
+  try {
+    var r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", { headers: { "x-goog-api-key": key } });
+    if (!r.ok) return (listed = []);
+    var d = await r.json();
+    listed = (d.models || []).filter(function(m){
+      var n = m.name.replace("models/", "");
+      return (m.supportedGenerationMethods || []).indexOf("generateContent") >= 0 && /flash/.test(n) &&
+             !/image|tts|live|audio|embed|robotics|transcribe|computer|thinking-exp|banana/.test(n);
+    }).map(function(m){ return m.name.replace("models/", ""); });
+    // newest version numbers first; plain "flash" before "flash-lite"
+    var ver = function(n){ var m = /gemini-(\d+(?:\.\d+)?)/.exec(n); return m ? parseFloat(m[1]) : (/latest/.test(n) ? 99 : 0); };
+    listed.sort(function(x, y){ return (ver(y) - ver(x)) || ((/lite/.test(x) ? 1 : 0) - (/lite/.test(y) ? 1 : 0)) || ((/preview|exp/.test(x) ? 1 : 0) - (/preview|exp/.test(y) ? 1 : 0)); });
+  } catch(e){ listed = []; }
+  return listed;
+}
+async function candidates(c, model){
+  var avail = await listModels(c.key);
+  var chosen = c.model === "auto" ? "" : c.model;
+  var order = [model, chosen, pref("working_model")].concat(PREFERRED, avail);
+  return order.filter(function(v, i, s){ return v && s.indexOf(v) === i && !BAD[v] &&
+    (!avail.length || avail.indexOf(v) >= 0 || /latest$/.test(v)); });
+}
+async function gemini(body, model, opt){
+  opt = opt || {};
   var c = cfg();
-  var models = [model || c.model, "gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
-               .filter(function(v, i, s){ return v && s.indexOf(v) === i; });
-  var last = "";
-  for (var i = 0; i < models.length; i++){
+  var models = await candidates(c, model), last = "", limited = false;
+  if (!models.length){ BAD = {}; models = await candidates(c, model); }
+  for (var i = 0; i < models.length && i < (opt.search ? 2 : 8); i++){
     var res;
     try { res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + models[i] + ":generateContent",
             { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": c.key }, body: JSON.stringify(body) }); }
     catch(e){ throw new Error("ইন্টারনেট সংযোগ নেই বা সার্ভারে পৌঁছানো যাচ্ছে না।"); }
-    if (res.ok) return await res.json();
+    if (res.ok){ if (!model && !opt.search) pref("working_model", models[i]); return await res.json(); }
+    if (opt.search){ last = res.status + " search"; continue; }  // search failures never ban a chat model
     var t = ""; try { t = await res.text(); } catch(e){}
     if ((res.status === 400 || res.status === 403) && /API.?key/i.test(t)) throw new Error("API key সঠিক না। মেনু → সেটিংসে গিয়ে আবার দিন।");
-    if (res.status === 429){ last = "429"; continue; }
-    last = "HTTP " + res.status + " " + t.slice(0, 160);
-    if (res.status !== 404 && res.status < 500) break;
+    if (res.status === 400 && /location is not supported|User location/i.test(t)) throw new Error("Google আপনার এলাকা থেকে এই সেবা দিচ্ছে না।");
+    if (res.status === 400 && !/model/i.test(t)) { last = "400 " + t.slice(0, 140); break; }  // request problem, not model
+    if (res.status === 429){ limited = true; if (/limit: ?0\b|free_tier.*0/i.test(t)) BAD[models[i]] = 1; continue; }
+    BAD[models[i]] = 1;                       // 404 / not available to new users / 5xx -> try next model
+    if (pref("working_model") === models[i]) pref("working_model", "");
+    last = res.status + " " + models[i];
   }
-  if (last === "429") throw new Error("ফ্রি লিমিট শেষ। কিছুক্ষণ পর আবার চেষ্টা করুন।");
-  throw new Error("AI থেকে উত্তর আসেনি (" + last + ")");
+  if (limited) throw new Error("ফ্রি লিমিট এই মুহূর্তে শেষ। এক মিনিট পর আবার চেষ্টা করুন।");
+  throw new Error("AI থেকে উত্তর আসেনি (" + last + ")। একটু পর আবার চেষ্টা করুন।");
 }
 async function webSearch(q){
-  var data = await gemini({ contents: [{ role: "user", parts: [{ text: "Search the web and answer factually with numbers and dates: " + q }] }],
-                            tools: [{ google_search: {} }] });
-  var cand = (data.candidates || [])[0] || {};
-  var text = ((cand.content || {}).parts || []).map(function(p){ return p.text || ""; }).join("");
-  var src = ((cand.groundingMetadata || {}).groundingChunks || []).map(function(c){ return c.web ? { title: c.web.title, url: c.web.uri } : null; })
-            .filter(Boolean).slice(0, 6);
-  return { query: q, answer: text, sources: src };
+  try {
+    var data = await gemini({ contents: [{ role: "user", parts: [{ text: "Search the web and answer factually with numbers and dates: " + q }] }],
+                              tools: [{ google_search: {} }] }, null, { search: true });
+    var cand = (data.candidates || [])[0] || {};
+    var text = ((cand.content || {}).parts || []).map(function(p){ return p.text || ""; }).join("");
+    var src = ((cand.groundingMetadata || {}).groundingChunks || []).map(function(c){ return c.web ? { title: c.web.title, url: c.web.uri } : null; })
+              .filter(Boolean).slice(0, 6);
+    if (text) return { query: q, answer: text, sources: src };
+  } catch(e){ if (/ইন্টারনেট/.test(e.message)) throw e; }
+  return await ddgSearch(q);   // fallback when Google Search grounding isn't available
+}
+async function ddgSearch(q){
+  var url = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(q), html = "";
+  if (A){ var r = J(A.fetchUrl(url, 400000)); if (r.error) return { error: "Search failed: " + r.error }; html = r.html || ""; }
+  else html = await (await fetch(url)).text();
+  var doc = new DOMParser().parseFromString(html, "text/html"), out = [];
+  doc.querySelectorAll(".result").forEach(function(el){
+    var a = el.querySelector("a.result__a"); if (!a || out.length >= 6) return;
+    var href = a.getAttribute("href") || "", m = /[?&]uddg=([^&]+)/.exec(href);
+    var sn = el.querySelector(".result__snippet");
+    out.push({ title: a.textContent.trim(), url: m ? decodeURIComponent(m[1]) : href, snippet: sn ? sn.textContent.trim() : "" });
+  });
+  return out.length ? { query: q, results: out, note: "Use fetch_url on 1-2 of these for details." } : { error: "No results" };
 }
 function clean(h){ // remove helper fields before sending
   return h.map(function(c){ return { role: c.role, parts: c.parts.map(function(p){
@@ -579,6 +629,7 @@ function closeSettings(){ $("settings").classList.remove("open"); }
 $("openSettings").onclick = openSettings; $("closeSettings").onclick = closeSettings;
 $("settings").onclick = function(e){ if (e.target === this) closeSettings(); };
 $("saveSettings").onclick = function(){
+  if ($("key").value.trim() !== pref("api_key") || $("model").value !== cfg().model){ listed = null; BAD = {}; pref("working_model", ""); }
   pref("api_key", $("key").value.trim()); pref("model", $("model").value); pref("about", $("about").value.trim());
   pref("confirm", $("confirmToggle").checked ? "1" : "0"); pref("auto_speak", $("autoSpeak").checked ? "1" : "0");
   closeSettings(); setStatus("সেটিংস সেভ হয়েছে ✓"); setTimeout(function(){ if (!busy) setStatus("প্রস্তুত"); }, 2000);
