@@ -707,7 +707,7 @@ public class MainActivity extends Activity {
                         c = (HttpURLConnection) new URL(url).openConnection();
                         live.put(id, c);
                         c.setRequestMethod(method);
-                        c.setConnectTimeout(20000);
+                        c.setConnectTimeout(12000);
                         c.setReadTimeout(stream ? 180000 : 120000);
                         c.setInstanceFollowRedirects(true);
                         c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android " + Build.VERSION.RELEASE
@@ -795,7 +795,7 @@ public class MainActivity extends Activity {
                         c = (HttpURLConnection) new URL(url).openConnection();
                         live.put(id, c);
                         c.setRequestMethod("POST");
-                        c.setConnectTimeout(20000);
+                        c.setConnectTimeout(12000);
                         c.setReadTimeout(120000);
                         c.setDoOutput(true);
                         c.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
@@ -847,7 +847,7 @@ public class MainActivity extends Activity {
                             data = Base64.decode(url.substring(4), Base64.DEFAULT);
                         } else {
                             HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-                            c.setConnectTimeout(20000);
+                            c.setConnectTimeout(12000);
                             c.setReadTimeout(120000);
                             c.setInstanceFollowRedirects(true);
                             InputStream in = c.getInputStream();

@@ -279,7 +279,11 @@
       return acc;
     }, function (e) {
       if (o.signal && o.signal.cancelled) { acc.cancelled = true; return acc; }
-      throw ProviderError("ইন্টারনেট সংযোগে সমস্যা (" + (e.message || e) + ")", "network", 0);
+      var m = String(e.message || e);
+      S.unreachable = S.unreachable || {}; S.unreachable[o.p.id] = Date.now();
+      throw ProviderError(/timed? ?out|ETIMEDOUT|connect|UnknownHost|unreachable|reset/i.test(m)
+        ? o.p.name + ": এই নেটওয়ার্ক থেকে সার্ভারে পৌঁছানো যাচ্ছে না"
+        : o.p.name + ": সংযোগে সমস্যা", "network", 0);
     });
   }
 

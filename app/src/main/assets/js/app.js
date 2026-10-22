@@ -105,7 +105,12 @@
   function customById(id) { for (var i = 0; i < S.settings.customModels.length; i++) if (S.settings.customModels[i].id === id) return S.settings.customModels[i]; return null; }
   function autoRoutes() {
     return S.providers.usable().filter(function (p) { return !S.preset(p.preset).mediaOnly; }).slice().sort(function (a, b) { return ORDER.indexOf(a.preset) - ORDER.indexOf(b.preset); })
-      .map(function (p) { return { p: p, model: S.pickModel(p) }; }).filter(function (r) { return r.model; });
+      .map(function (p) { return { p: p, model: S.pickModel(p) }; }).filter(function (r) { return r.model; })
+      // providers that just failed to connect go last for 5 minutes
+      .sort(function (a, b) {
+        var u = S.unreachable || {}, now = Date.now();
+        return ((u[a.p.id] && now - u[a.p.id] < 3e5) ? 1 : 0) - ((u[b.p.id] && now - u[b.p.id] < 3e5) ? 1 : 0);
+      });
   }
   function routesFor(ref) {
     ref = ref || "auto";
@@ -202,14 +207,18 @@
           if (signal.cancelled) return;
           if (e.kind === "notools" && !noTools[route.p.id + route.model]) { noTools[route.p.id + route.model] = 1; steps--; return step(); }
           if (e.kind === "model" && route.p.working === route.model) { route.p.working = ""; saveSettings(); }
-          if (e.kind === "model" && route.p.type === "gemini" && !route.retried) {
-            // try the next Gemini model before leaving Gemini
-            var alt = S.chatModels(route.p).filter(function (m) { return m !== route.model; })[0];
-            if (alt) { routes.splice(ri + 1, 0, { p: route.p, model: alt, retried: true }); }
+          if (route.p.type === "gemini" && (e.kind === "model" || e.kind === "limit" || e.kind === "server")) {
+            // each Gemini model has its own free quota: try other Gemini models before leaving Gemini
+            var tried = routes.slice(0, ri + 1).filter(function (r) { return r.p.id === route.p.id; }).map(function (r) { return r.model; });
+            var alts = S.chatModels(route.p).filter(function (m) { return tried.indexOf(m) < 0 && !/pro/.test(m); }).slice(0, 4 - tried.length);
+            if (alts.length && !routes.some(function (r, k) { return k > ri && r.p.id === route.p.id; })) {
+              routes.splice.apply(routes, [ri + 1, 0].concat(alts.map(function (m) { return { p: route.p, model: m, retried: true }; })));
+            }
           }
           if (ri + 1 < routes.length) {
             ri++; steps--;
             if (routes[ri].p.id !== route.p.id) ui.turnNote(turn, e.message + " → " + routes[ri].p.name + " দিয়ে চেষ্টা করছি…");
+            else ui.turnNote(turn, e.message + " → " + shortModel(routes[ri].model) + " দিয়ে চেষ্টা করছি…");
             return step();
           }
           ui.turnError(turn, e.message, e.kind === "auth");
