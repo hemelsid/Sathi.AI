@@ -104,7 +104,7 @@
    * ========================================================= */
   function customById(id) { for (var i = 0; i < S.settings.customModels.length; i++) if (S.settings.customModels[i].id === id) return S.settings.customModels[i]; return null; }
   function autoRoutes() {
-    return S.providers.usable().slice().sort(function (a, b) { return ORDER.indexOf(a.preset) - ORDER.indexOf(b.preset); })
+    return S.providers.usable().filter(function (p) { return !S.preset(p.preset).mediaOnly; }).slice().sort(function (a, b) { return ORDER.indexOf(a.preset) - ORDER.indexOf(b.preset); })
       .map(function (p) { return { p: p, model: S.pickModel(p) }; }).filter(function (r) { return r.model; });
   }
   function routesFor(ref) {
@@ -141,7 +141,7 @@
     }
     L.push("Current date/time: " + now.toLocaleString("en-GB", { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }) +
       " (" + Intl.DateTimeFormat().resolvedOptions().timeZone + "). Running on model " + route.model + " via " + route.p.name + ".");
-    L.push("Guidelines:\n- Answer directly and helpfully; match length to the question.\n- Use tools whenever they make the answer more correct or current: web_search for news/prices/facts you are unsure of (then cite 1-3 sources as markdown links), calculate/run_code for math, weather, currency, wikipedia, generate_image when asked to draw/create a picture.\n- Never invent facts, numbers, links or quotes. If unsure, search or say so.\n- If the user shares a lasting personal fact or asks you to remember something, call remember.\n- Attached images, PDFs and files are visible to you; analyse them carefully.");
+    L.push("Guidelines:\n- Answer directly and helpfully; match length to the question.\n- Use tools whenever they make the answer more correct or current: web_search for news/prices/facts you are unsure of (then cite 1-3 sources as markdown links), calculate/run_code for math, weather, currency, wikipedia, generate_image when asked to draw/create a picture.\n- Never invent facts, numbers, links or quotes. If unsure, search or say so.\n- If the user shares a lasting personal fact or asks you to remember something, call remember.\n- Images: call generate_image with a rich English prompt (pick a fitting style/aspect; count up to 4 for options). Videos: generate_video for a short realistic AI clip; make_story_video for stories, explainers, reels, wishes or ads with narration (free). Ask nothing first unless the request is truly unclear.\n- NEVER say an image or video was made unless the tool result has ok:true. If it failed, say so plainly in one line and point to the setup button.\n- Attached images, PDFs and files are visible to you; analyse them carefully.");
     if (conv.agent) {
       L.push("AGENT MODE is ON. For tasks that need several steps: first write a very short plan (1-3 lines), then use tools one step at a time, check each result, fix problems yourself, and finish with a clear summary of what was done. " +
         "Phone tools (alarm, timer, calendar, call, SMS, email, maps, links) open the relevant app for the user to confirm. Files are saved to Download/Shathi. " +
@@ -225,24 +225,35 @@
 
   function runCalls(conv, turn, msg, signal) {
     var results = [];
+    var row = null;
     var ctx = {
-      addImage: function (src, prompt) { msg.images = (msg.images || []).concat([src]); msg.imagePrompt = prompt; ui.renderAssistant(turn, msg); saveChats(); }
+      addImage: function (src, meta) {
+        var item = typeof meta === "object" && meta ? { src: src, uri: meta.uri, path: meta.path } : src;
+        msg.images = (msg.images || []).concat([item]); ui.renderAssistant(turn, msg); saveChats();
+      },
+      addVideo: function (v) {
+        if (v.blob) { VIDEO_BLOBS[v.uri || v.path || S.uid()] = URL.createObjectURL(v.blob); }
+        msg.videos = (msg.videos || []).concat([{ uri: v.uri, path: v.path, title: v.title, mime: v.mime || "video/mp4" }]);
+        ui.renderAssistant(turn, msg); saveChats();
+      },
+      progress: function (t) { if (row && row.prog) row.prog(t); },
+      needSetup: function (kind, why) { msg.setup = kind; msg.setupWhy = why; ui.renderAssistant(turn, msg); }
     };
     var chain = Promise.resolve();
     msg.calls.forEach(function (c) {
       chain = chain.then(function () {
         if (signal.cancelled) { results.push({ id: c.id, name: c.name, result: { error: "stopped by user" } }); return; }
-        var t = S.toolByName(c.name), row = ui.stepRow(turn, c, t);
+        var t = S.toolByName(c.name); row = ui.stepRow(turn, c, t);
         if (!t) { row.fail("অজানা টুল"); results.push({ id: c.id, name: c.name, result: { error: "Unknown tool" } }); return; }
         var ask = (t.confirm === "always" || (t.confirm === "file" && S.settings.agent.confirmFiles)) && t.ask ? ui.confirm(t.ask(c.args || {}), "হ্যাঁ") : Promise.resolve(true);
         return ask.then(function (ok) {
           if (!ok) { row.fail("আপনি বাতিল করেছেন"); results.push({ id: c.id, name: c.name, result: { error: "User declined" } }); return; }
           return Promise.race([
             Promise.resolve().then(function () { return t.run(c.args || {}, ctx); }),
-            S.sleep(90000).then(function () { return { error: "সময় শেষ" }; })
+            S.sleep(/video/.test(c.name) ? 15 * 60000 : 120000).then(function () { return { error: "সময় শেষ" }; })
           ]).then(function (res) {
             if (res && res.error && /NO_PERMISSION/.test(res.error)) { res.error = "Storage permission missing. Ask the user to allow 'All files access' (button shown)."; ui.storagePrompt(); }
-            if (res && res.error) row.fail(String(res.error).slice(0, 90)); else row.ok(summary(c.name, res));
+            if (res && (res.error || res.ok === false)) row.fail(String(res.error || "ব্যর্থ").slice(0, 120)); else row.ok(summary(c.name, res));
             results.push({ id: c.id, name: c.name, result: res == null ? { ok: true } : res });
           }, function (e) {
             row.fail(String(e.message || e).slice(0, 90)); results.push({ id: c.id, name: c.name, result: { error: String(e.message || e) } });
@@ -261,6 +272,8 @@
     if (name === "fetch_url") return r.title || "";
     if (name === "save_file") return r.path || "";
     if (name === "wikipedia") return r.title || "";
+    if (name === "generate_image") return S.bnNum(r.created || 0) + "টি ছবি · " + (r.provider || "");
+    if (/video/.test(name)) return (r.kind === "story_video" ? "স্টোরি ভিডিও · " + S.bnNum(r.seconds || 0) + " সেকেন্ড" : r.provider || "") + (r.saved_to ? " · " + r.saved_to : "");
     return "";
   }
 
@@ -344,16 +357,26 @@
     box.innerHTML = "";
     if (msg.text) { var md = document.createElement("div"); md.className = "md"; md.innerHTML = S.md(msg.text); wireMd(md); box.appendChild(md); }
     if (msg.images && msg.images.filter(Boolean).length) {
-      var g = document.createElement("div"); g.className = "imgs";
-      msg.images.filter(Boolean).forEach(function (src) {
+      var g = document.createElement("div"); g.className = "imgs" + (msg.images.length > 1 ? " two" : "");
+      msg.images.filter(Boolean).forEach(function (it) {
+        var src = typeof it === "string" ? it : it.src;
+        if (!src) return;
         var f = document.createElement("figure"), im = document.createElement("img"); im.src = src; im.loading = "lazy";
-        im.onerror = function () { f.innerHTML = '<div class="errbox">ছবি লোড হয়নি। ছবি বানাতে Gemini বা Pollinations key যোগ করুন।</div>'; };
-        var cap = document.createElement("figcaption"), sv = document.createElement("button"); sv.textContent = "⬇ সেভ";
-        sv.onclick = function () { saveImage(src); };
-        cap.appendChild(sv); f.appendChild(im); f.appendChild(cap); g.appendChild(f);
+        im.onerror = function () { f.innerHTML = '<div class="errbox">ছবিটা আর পাওয়া যাচ্ছে না।</div>'; };
+        im.onclick = function () { ui.viewImage(src, it); };
+        var cap = document.createElement("figcaption");
+        if (it.uri && A) {
+          var sh = document.createElement("button"); sh.textContent = "↗ শেয়ার"; sh.onclick = function (e) { e.stopPropagation(); A.shareUri(it.uri, "image/*"); };
+          cap.appendChild(sh);
+        } else {
+          var sv = document.createElement("button"); sv.textContent = "⬇ সেভ"; sv.onclick = function (e) { e.stopPropagation(); saveImage(src); }; cap.appendChild(sv);
+        }
+        f.appendChild(im); f.appendChild(cap); g.appendChild(f);
       });
       box.appendChild(g);
     }
+    (msg.videos || []).forEach(function (v) { box.appendChild(videoCard(v)); });
+    if (msg.setup) box.appendChild(setupCard(msg.setup, msg.setupWhy));
     if (msg.calls && msg.calls.length) {
       var st = turn._steps;
       if (!st) {
@@ -365,18 +388,62 @@
     }
     scrollEnd();
   };
+  var VIDEO_BLOBS = {};
+  function videoCard(v) {
+    var w = document.createElement("div"); w.className = "vcard";
+    var src = VIDEO_BLOBS[v.uri || v.path] || v.uri;
+    w.innerHTML = '<video controls playsinline preload="metadata"></video><div class="vbar"><span class="vt"></span><span class="sp"></span></div>';
+    var vid = $("video", w); if (src) vid.src = src;
+    vid.onerror = function () { vid.replaceWith(Object.assign(document.createElement("div"), { className: "vph", textContent: "🎬 ভিডিও তৈরি হয়েছে — নিচের বোতামে চাপুন" })); };
+    $(".vt", w).textContent = (v.title || "ভিডিও") + (v.path ? " · " + v.path : "");
+    var bar = $(".vbar", w);
+    if (v.uri && A) {
+      [["▶ গ্যালারিতে", function () { A.openUri(v.uri, v.mime || "video/*"); }], ["↗ শেয়ার", function () { A.shareUri(v.uri, v.mime || "video/*"); }]].forEach(function (x) {
+        var b = document.createElement("button"); b.className = "mini"; b.textContent = x[0]; b.onclick = x[1]; bar.appendChild(b);
+      });
+    }
+    return w;
+  }
+  function setupCard(kind, why) {
+    var c = document.createElement("div"); c.className = "setupcard";
+    c.innerHTML = "<b>" + (kind === "image" ? "🎨 ছবি বানাতে একটা ফ্রি সার্ভিস যোগ করুন" : "🎬 ভিডিওর জন্য সার্ভিস যোগ করুন") + "</b><p></p>";
+    $("p", c).textContent = (why ? why + " " : "") + "সবচেয়ে বেশি ফ্রি: Cloudflare (দিনে ~২০০+ ছবি)।";
+    var row = document.createElement("div"); row.className = "row2";
+    [["cloudflare", "☁ Cloudflare"], ["pollinations", "🌸 Pollinations"], ["huggingface", "🤗 Hugging Face"]].forEach(function (x) {
+      var b = document.createElement("button"); b.textContent = x[1]; b.onclick = function () { pages.providerEdit(S.providers.find(x[0]), x[0]); }; row.appendChild(b);
+    });
+    c.appendChild(row); return c;
+  }
+  ui.viewImage = function (src, it) {
+    var bg = document.createElement("div"); bg.className = "viewer";
+    bg.innerHTML = '<img alt=""><div class="vb"></div>'; $("img", bg).src = src;
+    var close = function () { bg.remove(); popBack(close); };
+    bg.onclick = function (e) { if (e.target === bg || e.target.tagName === "IMG") close(); };
+    var vb = $(".vb", bg);
+    if (it && it.uri && A) {
+      [["খুলুন", function () { A.openUri(it.uri, "image/*"); }], ["শেয়ার", function () { A.shareUri(it.uri, "image/*"); }]].forEach(function (x) {
+        var b = document.createElement("button"); b.textContent = x[0]; b.onclick = function (e) { e.stopPropagation(); x[1](); }; vb.appendChild(b);
+      });
+    }
+    document.body.appendChild(bg); pushBack(close);
+  };
+
   ui.stepRow = function (turn, call, tool) {
     var st = turn._steps; if (!st) { ui.renderAssistant(turn, { calls: [call] }); st = turn._steps; }
     var row = document.createElement("div"); row.className = "st";
-    var a = call.args || {}, hint = a.query || a.location || a.url || a.expression || a.prompt || a.path || a.filename || a.title || a.message || a.number || "";
+    var a = call.args || {}, hint = a.query || a.location || a.url || a.expression || a.topic || a.prompt || a.path || a.filename || a.title || a.message || a.number || "";
     row.innerHTML = '<span class="s"><span class="spin"></span></span><span class="d"></span>';
     $(".d", row).innerHTML = "<span>" + esc(tool ? tool.label : call.name) + "</span>" + (hint ? "<small>" + esc(String(hint).slice(0, 80)) + "</small>" : "");
     st.appendChild(row);
     var n = $$(".st", st).length; $(".cnt", st).textContent = S.bnNum(n) + " ধাপ";
     scrollEnd();
     return {
-      ok: function (s) { $(".s", row).textContent = "✓"; $(".s", row).style.color = "var(--ok)"; if (s) { var sm = $("small", row) || row.querySelector(".d").appendChild(document.createElement("small")); sm.textContent = s; } },
-      fail: function (s) { $(".s", row).textContent = "✕"; $(".s", row).style.color = "var(--danger)"; var sm = document.createElement("small"); sm.textContent = s; sm.style.color = "var(--danger)"; $(".d", row).appendChild(sm); }
+      prog: function (s) {
+        var sm = row.querySelector("small.pg"); if (!sm) { sm = document.createElement("small"); sm.className = "pg"; $(".d", row).appendChild(sm); }
+        sm.textContent = s; scrollEnd();
+      },
+      ok: function (s) { var pg = row.querySelector("small.pg"); if (pg) pg.remove(); $(".s", row).textContent = "✓"; $(".s", row).style.color = "var(--ok)"; if (s) { var sm = $("small", row) || row.querySelector(".d").appendChild(document.createElement("small")); sm.textContent = s; } },
+      fail: function (s) { var pg = row.querySelector("small.pg"); if (pg) pg.remove(); $(".s", row).textContent = "✕"; $(".s", row).style.color = "var(--danger)"; var sm = document.createElement("small"); sm.textContent = s; sm.style.color = "var(--danger)"; $(".d", row).appendChild(sm); }
     };
   };
   ui.turnNote = function (turn, text) { var n = document.createElement("div"); n.className = "note"; n.textContent = text; $(".tbody", turn).appendChild(n); scrollEnd(); };
@@ -458,9 +525,10 @@
   }
   var SUGS = [
     ["📰", "আজকের খবর", "বাংলাদেশের আজকের প্রধান খবরগুলো সংক্ষেপে বলো, সূত্রসহ।", false],
-    ["⛅", "আবহাওয়া", "ঢাকার আজকের আর আগামী ৩ দিনের আবহাওয়া কেমন?", false],
+
     ["✍️", "লিখে দাও", "অফিসে ২ দিনের ছুটির জন্য একটা ভদ্র দরখাস্ত লিখে দাও।", false],
     ["🎨", "ছবি আঁকো", "সূর্যাস্তের সময় পদ্মা নদীতে একটা নৌকার সুন্দর ছবি আঁকো।", false],
+    ["🎬", "ভিডিও বানাও", "একটা ছোট্ট পাখির বন্ধুত্বের গল্প নিয়ে বাংলায় বর্ণনাসহ ৫ দৃশ্যের স্টোরি ভিডিও বানাও।", false],
     ["🛠", "এজেন্ট", "আমার ফোনের স্টোরেজ পরীক্ষা করো, কোন ফাইলগুলো সবচেয়ে বেশি জায়গা নিচ্ছে বলো আর কী মুছলে ভালো হয় পরামর্শ দাও।", true],
     ["⏰", "রিমাইন্ডার", "কাল সকাল ৬:৩০-এ একটা অ্যালার্ম দাও, নাম দাও 'ফজর'।", true]
   ];
@@ -544,7 +612,13 @@
     cur.agent = !cur.agent; this.setAttribute("aria-pressed", cur.agent ? "true" : "false");
     S.toast(cur.agent ? "🛠 এজেন্ট মোড চালু: ফোনের কাজ, ফাইল, কোড — সব টুল" : "এজেন্ট মোড বন্ধ"); saveChats();
   };
-  $("#attachBtn").onclick = function () { $("#fileInput").click(); };
+  $("#attachBtn").onclick = function () {
+    ui.menu($("#attachBtn"), [
+      ["📎 ছবি / ফাইল যোগ করুন", function () { $("#fileInput").click(); }],
+      ["🎨 ছবি বানান", function () { pages.studio("image"); }],
+      ["🎬 ভিডিও বানান", function () { pages.studio("video"); }]
+    ], true);
+  };
   function readFileObj(f) {
     return new Promise(function (res, rej) {
       var r = new FileReader(); r.onload = function () { res(r.result); }; r.onerror = function () { rej(r.error); };
@@ -811,13 +885,14 @@
       $(".ok", bg).onclick = function () { done(inp.value); }; $(".no", bg).onclick = cancel; pushBack(cancel);
     });
   };
-  ui.menu = function (anchor, items) {
+  ui.menu = function (anchor, items, up) {
     var m = document.createElement("div"); m.className = "menu";
     items.forEach(function (it) { var b = document.createElement("button"); b.textContent = it[0]; if (it[2]) b.className = "danger"; b.onclick = function () { close(); it[1](); }; m.appendChild(b); });
     var bg = document.createElement("div"); bg.style.cssText = "position:fixed;inset:0;z-index:39"; bg.onclick = function () { close(); };
     document.body.appendChild(bg); document.body.appendChild(m);
     var r = anchor.getBoundingClientRect(), mh = m.offsetHeight;
-    m.style.top = Math.min(r.bottom + 4, W.innerHeight - mh - 10) + "px"; m.style.right = Math.max(8, W.innerWidth - r.right) + "px";
+    if (up) { m.style.top = Math.max(10, r.top - mh - 6) + "px"; m.style.left = Math.max(8, r.left) + "px"; }
+    else { m.style.top = Math.min(r.bottom + 4, W.innerHeight - mh - 10) + "px"; m.style.right = Math.max(8, W.innerWidth - r.right) + "px"; }
     var close = function () { m.remove(); bg.remove(); popBack(close); }; pushBack(close);
   };
   ui.storagePrompt = function () {
@@ -856,7 +931,7 @@
         var add = document.createElement("button"); add.className = "row"; add.innerHTML = '<span class="ri" style="background:var(--surface2);color:var(--accent)">＋</span><span class="rt"><b>নিজের মডেল বানান</b><small>নাম, ব্যক্তিত্ব, জ্ঞান — আপনার মতো করে</small></span>';
         add.onclick = function () { close(); pages.customEdit(null); }; gc.appendChild(add);
       }
-      S.providers.usable().sort(function (a, b2) { return ORDER.indexOf(a.preset) - ORDER.indexOf(b2.preset); }).forEach(function (p) {
+      S.providers.usable().filter(function (p) { return !S.preset(p.preset).mediaOnly; }).sort(function (a, b2) { return ORDER.indexOf(a.preset) - ORDER.indexOf(b2.preset); }).forEach(function (p) {
         var pr = S.preset(p.preset), g = grp(p.name);
         var models = S.chatModels(p);
         if (p.preset === "openrouter") models = models.filter(function (m) { return /:free$/.test(m); }).concat(models.filter(function (m) { return !/:free$/.test(m); }));
@@ -931,10 +1006,10 @@
               function () { pages.providerEdit(p); });
           });
         }
-        [["free", "🆓 ফ্রি প্রোভাইডার"], ["premium", "💎 প্রিমিয়াম (পেইড) API"], ["own", "🖥 নিজের মডেল / সার্ভার"]].forEach(function (sec) {
+        [["free", "🆓 ফ্রি চ্যাট AI"], ["media", "🎨 ছবি ও ভিডিও (ফ্রি)"], ["premium", "💎 প্রিমিয়াম (পেইড) API"], ["own", "🖥 নিজের মডেল / সার্ভার"]].forEach(function (sec) {
           b.appendChild(el("div", { className: "gtitle", text: sec[1] }));
           var grid = el("div", { className: "pgrid" }); grid.style.marginTop = "8px"; b.appendChild(grid);
-          S.PRESETS.filter(function (x) { return x.tier === sec[0]; }).forEach(function (pr) {
+          S.PRESETS.filter(function (x) { return sec[0] === "media" ? x.media : x.tier === sec[0] && !x.mediaOnly; }).forEach(function (pr) {
             var c = el("button", { className: "pcard" });
             c.innerHTML = '<span class="ri" style="background:' + pr.color + '">' + pr.icon + "</span><b>" + esc(pr.name) + "</b><small>" + esc(pr.note) + "</small>";
             c.onclick = function () { pages.providerEdit(null, pr.id); }; grid.appendChild(c);
@@ -953,16 +1028,22 @@
       var baseIn = field(b, "Base URL", el("input", { value: p ? p.base : pr.base, placeholder: "https://…/v1" }),
         pr.id === "ollama" ? "কম্পিউটারের IP দিন, যেমন http://192.168.0.105:11434/v1 । Ollama চালানোর আগে OLLAMA_HOST=0.0.0.0 সেট করুন।" : "");
       if (pr.id !== "ollama" && pr.id !== "custom") baseIn.parentNode.hidden = true;
+      var manualHide = !!pr.mediaOnly;
       var kr = el("div", { className: "keyrow" }), key = el("input", { type: "password", value: p ? p.key : "", placeholder: pr.noKey ? "দরকার নেই (ঐচ্ছিক)" : "এখানে key পেস্ট করুন", autocomplete: "off" });
       var eye = el("button", { className: "btn ghost sm", text: "👁" }); eye.onclick = function () { key.type = key.type === "password" ? "text" : "password"; };
       kr.appendChild(key); kr.appendChild(eye);
       field(b, "API key", kr, pr.keyUrl ? 'key নেই? <a href="#" id="getKey">এখানে চাপুন → ' + esc(pr.keyUrl.replace(/^https:\/\//, "")) + "</a> (লগইন করে \"Create key\")" : "");
       var gk = $("#getKey", b); if (gk) gk.onclick = function (e) { e.preventDefault(); A ? A.openUrl(pr.keyUrl) : W.open(pr.keyUrl); };
+      var acct = null;
+      if (pr.needsAccount) acct = field(b, "Account ID", el("input", { value: p ? (p.accountId || "") : "", placeholder: "৩২ অক্ষরের Account ID" }),
+        "ধাপ: dash.cloudflare.com-এ ফ্রি অ্যাকাউন্ট খুলুন → বাঁদিকে <b>AI → Workers AI</b> → <b>Use REST API</b> → ওখানে Account ID কপি করুন আর <b>Create a Workers AI API Token</b> চেপে token নিন।");
       var manual = field(b, "মডেলের নাম (ঐচ্ছিক)", el("input", { value: p ? (p.manualModel || "") : "", placeholder: "খালি রাখলে নিজে খুঁজে নেবে" }),
         "তালিকা না এলে বা নির্দিষ্ট মডেল চাইলে নাম লিখুন।");
+      if (manualHide) manual.parentNode.hidden = true;
       var status = el("div", { className: "help" }); b.appendChild(status);
       var save = function () {
         var data = { name: name.value.trim() || pr.name, base: baseIn.value.trim() || pr.base, key: key.value.trim(), manualModel: manual.value.trim() };
+        if (acct) data.accountId = acct.value.trim();
         if (!p) p = S.providers.add(pr.id, data.key, data);
         else { for (var k in data) p[k] = data[k]; if (data.manualModel) p.working = ""; }
         p.enabled = true; saveSettings(); return p;
@@ -974,6 +1055,7 @@
         S.providers.refresh(pp).then(function (ms) {
           test.disabled = false;
           var n = S.chatModels(pp).length;
+          if (pr.mediaOnly) { status.style.color = "var(--ok)"; status.textContent = "✓ সংযোগ সফল! এখন ছবি বানানো যাবে।"; S.toast("✓ " + pp.name + " যুক্ত হয়েছে"); if (ui._providersPage && ui._providersPage._redraw) ui._providersPage._redraw(); return; }
           if (!n && !pp.manualModel) { status.style.color = "var(--warn)"; status.textContent = "সংযোগ হয়েছে কিন্তু কোনো চ্যাট মডেল পাওয়া যায়নি। মডেলের নাম লিখে দিন।"; return; }
           status.style.color = "var(--ok)"; status.textContent = "✓ সংযোগ সফল! " + S.bnNum(n) + "টি মডেল পাওয়া গেছে। সেরা পছন্দ: " + shortModel(S.pickModel(pp));
           S.toast("✓ " + pp.name + " যুক্ত হয়েছে"); if (ui._providersPage && ui._providersPage._redraw) ui._providersPage._redraw();
@@ -993,6 +1075,97 @@
           });
         });
       }
+    });
+  };
+
+  pages.studio = function (tab) {
+    ui.page("ছবি ও ভিডিও স্টুডিও", function (b, close) {
+      var state = { tab: tab || "image", style: "auto", aspect: "square", count: 1, smart: true, vmode: "story", vaspect: "portrait", scenes: 5, narration: true, music: true, dur: 6 };
+      var draw = function () {
+        b.innerHTML = "";
+        segRow(b, "", [["image", "🎨 ছবি"], ["video", "🎬 ভিডিও"]], state.tab, function (v) { state.tab = v; draw(); });
+        var ib = S.media.imageBackends(), vb = S.media.videoBackends();
+        var info = el("div", { className: "help" });
+        if (state.tab === "image") info.innerHTML = ib.length ? "ছবি বানাবে: <b>" + ib.map(function (x) { return esc(x.name); }).join(" → ") + "</b> (একটায় না হলে পরেরটায়)" : "";
+        else info.innerHTML = state.vmode === "ai" ? (vb.length ? "AI ভিডিও: <b>" + vb.map(function (x) { return esc(x.name); }).join(" → ") + "</b>" : "")
+          : "ফ্রি স্টোরি ভিডিও: AI গল্প লিখবে, প্রতিটা দৃশ্যের ছবি আঁকবে, বাংলায় বর্ণনা দেবে, ক্যাপশন-মিউজিকসহ ফোনেই ভিডিও বানাবে।";
+        b.appendChild(info);
+        if (state.tab === "image" && !ib.length) b.appendChild(setupCard("image", "ছবি বানানোর কোনো সার্ভিস এখনো যুক্ত নেই।"));
+        if (state.tab === "video" && state.vmode === "ai" && !vb.length) {
+          var sc = setupCard("video", "AI ভিডিওর জন্য Pollinations-এর ফ্রি key (সীমিত), অথবা Gemini Veo / OpenAI Sora (পেইড) লাগে।"); b.appendChild(sc);
+        }
+        var idea = field(b, state.tab === "image" ? "কী আঁকবো?" : state.vmode === "ai" ? "কী ধরনের ভিডিও?" : "ভিডিও কী নিয়ে?",
+          el("textarea", { value: state.idea || "", placeholder: state.tab === "image" ? "যেমন: বর্ষায় গ্রামের মেঠোপথে লাল ছাতা হাতে একটা মেয়ে" :
+            state.vmode === "ai" ? "যেমন: সুন্দরবনের নদীতে ভোরের কুয়াশায় ভেসে চলা নৌকা, ধীরে ক্যামেরা এগোচ্ছে" : "যেমন: পিঁপড়া আর ঘাসফড়িংয়ের গল্প / আমার দোকানের ঈদ অফারের বিজ্ঞাপন / জন্মদিনের শুভেচ্ছা" }));
+        idea.oninput = function () { state.idea = idea.value; };
+        if (state.tab === "image") {
+          var chips = el("div", { className: "emo styles" });
+          S.media.STYLES.forEach(function (st) { var x = el("button", { text: st[1] }); if (st[0] === state.style) x.className = "on"; x.onclick = function () { state.style = st[0]; draw(); }; chips.appendChild(x); });
+          field(b, "স্টাইল", chips);
+          segRow(b, "আকার", [["square", "◻ বর্গ"], ["portrait", "▯ লম্বা"], ["landscape", "▭ চওড়া"]], state.aspect, function (v) { state.aspect = v; });
+          segRow(b, "কয়টা", [[1, "১"], [2, "২"], [4, "৪"]], state.count, function (v) { state.count = v; });
+          var g = el("div", { className: "group" }); b.appendChild(g);
+          switchRow(g, "✨ স্মার্ট প্রম্পট", "AI আপনার আইডিয়াকে বিস্তারিত, সুন্দর প্রম্পটে বদলে দেবে", state.smart, function (v) { state.smart = v; });
+        } else {
+          segRow(b, "ধরন", [["story", "🎞 স্টোরি ভিডিও (ফ্রি)"], ["ai", "🤖 AI ভিডিও ক্লিপ"]], state.vmode, function (v) { state.vmode = v; draw(); });
+          segRow(b, "আকার", [["portrait", "▯ রিলস"], ["landscape", "▭ ইউটিউব"], ["square", "◻ বর্গ"]], state.vaspect, function (v) { state.vaspect = v; });
+          if (state.vmode === "story") {
+            segRow(b, "দৃশ্য", [[3, "৩"], [5, "৫"], [7, "৭"], [10, "১০"]], state.scenes, function (v) { state.scenes = v; });
+            var chips2 = el("div", { className: "emo styles" });
+            S.media.STYLES.slice(0, 9).forEach(function (st) { var x = el("button", { text: st[1] }); if (st[0] === state.style) x.className = "on"; x.onclick = function () { state.style = st[0]; draw(); }; chips2.appendChild(x); });
+            field(b, "ছবির স্টাইল", chips2);
+            var g2 = el("div", { className: "group" }); b.appendChild(g2);
+            switchRow(g2, "🎙 বাংলা বর্ণনা", "AI বা ফোনের ভয়েসে গল্প পড়ে শোনাবে", state.narration, function (v) { state.narration = v; });
+            switchRow(g2, "🎵 হালকা মিউজিক", "", state.music, function (v) { state.music = v; });
+          } else {
+            segRow(b, "দৈর্ঘ্য", [[4, "৪ সে."], [6, "৬ সে."], [8, "৮ সে."]], state.dur, function (v) { state.dur = v; });
+          }
+        }
+        var go = btn(b, state.tab === "image" ? "🎨 ছবি বানান" : "🎬 ভিডিও বানান", "primary", function () { run(); });
+        var out = el("div", { className: "studio-out" }); b.appendChild(out);
+        function prog(t, f) {
+          out.innerHTML = '<div class="prog"><div class="pt"></div><div class="pbar"><i></i></div><div class="help">অ্যাপ খোলা রাখুন</div></div>';
+          $(".pt", out).innerHTML = '<span class="spin"></span> ' + esc(t); if (f != null) $(".pbar i", out).style.width = Math.round(f * 100) + "%";
+        }
+        function run() {
+          var text = (idea.value || "").trim(); if (!text) { S.toast("কী বানাবো লিখুন"); return; }
+          if (!S.providers.usable().length) { pages.providers(); return; }
+          go.disabled = true; if (A) A.keepAwake(true);
+          var done = function () { go.disabled = false; if (A) A.keepAwake(false); };
+          if (state.tab === "image") {
+            prog(state.smart ? "✨ প্রম্পট সাজাচ্ছি…" : "আঁকছি…", 0.1);
+            (state.smart ? S.media.enhance(text, state.style) : Promise.resolve(text)).then(function (pr) {
+              prog("🎨 আঁকছি…", 0.35);
+              return S.media.makeImages(pr, { aspect: state.aspect, style: state.style, count: state.count, onStatus: function (t) { prog(t, 0.5); } })
+                .then(function (list) { return Promise.all(list.map(S.media.finalizeImage)); })
+                .then(function (fin) {
+                  out.innerHTML = ""; var g = el("div", { className: "imgs" + (fin.length > 1 ? " two" : "") }); out.appendChild(g);
+                  fin.forEach(function (f) {
+                    var fig = el("figure"), im = el("img", { src: f.preview }); im.onclick = function () { ui.viewImage(f.preview, f); }; fig.appendChild(im);
+                    var cap = el("figcaption"); if (f.uri && A) { var sh = el("button", { text: "↗ শেয়ার" }); sh.onclick = function () { A.shareUri(f.uri, "image/*"); }; cap.appendChild(sh); }
+                    fig.appendChild(cap); g.appendChild(fig);
+                  });
+                  out.appendChild(el("div", { className: "help", text: "✓ " + fin[0].provider + " · " + (fin[0].path ? "সেভ হয়েছে: Download/Shathi" : "") }));
+                  var pp = el("details", { className: "steps" }); pp.innerHTML = "<summary>ব্যবহৃত প্রম্পট</summary>"; pp.appendChild(el("div", { className: "st", text: pr })); out.appendChild(pp);
+                });
+            }).catch(function (e) { out.innerHTML = ""; out.appendChild(el("div", { className: "errbox", text: e.message })); if (e.code === "no_image_provider") out.appendChild(setupCard("image")); })
+              .then(done);
+          } else {
+            var job = state.vmode === "ai"
+              ? S.media.enhance(text + " (as a short video shot: describe motion and camera)", state.style).then(function (pr) {
+                  return S.media.makeAIVideo(pr, { duration: state.dur, aspect: state.vaspect, audio: true }, function (t) { prog(t); })
+                    .then(function (v) { return { uri: v.uri, path: v.path, title: text.slice(0, 50), mime: "video/mp4", provider: v.provider }; });
+                })
+              : S.media.storyVideo(text, { scenes: state.scenes, aspect: state.vaspect, style: state.style, narration: state.narration, music: state.music }, prog)
+                  .then(function (v) { if (v.blob) VIDEO_BLOBS[v.uri || v.path] = URL.createObjectURL(v.blob); return { uri: v.uri, path: v.path, title: v.title, mime: v.mime.split(";")[0], note: v.note }; });
+            job.then(function (v) {
+              out.innerHTML = ""; out.appendChild(videoCard(v));
+              if (v.note) out.appendChild(el("div", { className: "help", text: "ℹ " + v.note }));
+            }, function (e) { out.innerHTML = ""; out.appendChild(el("div", { className: "errbox", text: e.message })); }).then(done);
+          }
+        }
+      };
+      draw();
     });
   };
 

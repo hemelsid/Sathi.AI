@@ -72,10 +72,11 @@
   W.__net = function (id, type, data) {
     var p = pending[id]; if (!p) return;
     if (type === "status") p.status = parseInt(data, 10);
+    else if (type === "ctype") p.ctype = data;
     else if (type === "chunk") { p.buf += data; if (p.onChunk && p.status < 400) p.onChunk(data); else p.body += data; }
     else if (type === "body") p.body += data;
-    else if (type === "saved") { delete pending[id]; p.resolve({ status: 200, body: data }); }
-    else if (type === "end") { delete pending[id]; p.resolve({ status: p.status || parseInt(data, 10) || 0, body: p.body }); }
+    else if (type === "saved") { delete pending[id]; var sv = S.J(data, null); p.resolve({ status: 200, body: sv ? sv.path : data, uri: sv ? sv.uri : "" }); }
+    else if (type === "end") { delete pending[id]; p.resolve({ status: p.status || parseInt(data, 10) || 0, body: p.body, ctype: p.ctype || "" }); }
     else if (type === "error") { delete pending[id]; p.reject(new Error(data)); }
   };
 
@@ -141,6 +142,53 @@
       pending[id] = { resolve: resolve, reject: reject, status: 0, body: "", buf: "" };
       A.download(id, urlOrB64, name, mime || "application/octet-stream");
     });
+  };
+
+  /** Binary GET/POST: resolves {status, ctype, b64 (or text body on error)} */
+  S.httpBin = function (o) {
+    var id = "b" + S.uid();
+    var body = o.body == null ? "" : (typeof o.body === "string" ? o.body : JSON.stringify(o.body));
+    var headers = o.headers || {};
+    if (o.body != null && typeof o.body !== "string" && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+    var promise = new Promise(function (resolve, reject) {
+      if (A) {
+        pending[id] = { resolve: resolve, reject: reject, status: 0, body: "", buf: "" };
+        A.httpBin(id, o.method || (body ? "POST" : "GET"), o.url, JSON.stringify(headers), body);
+        return;
+      }
+      fetch(o.url, { method: o.method || (body ? "POST" : "GET"), headers: headers, body: body || undefined }).then(function (res) {
+        var ct = res.headers.get("content-type") || "";
+        if (!res.ok || /json|^text/.test(ct)) return res.text().then(function (t) { resolve({ status: res.status, ctype: ct, body: t }); });
+        return res.arrayBuffer().then(function (ab) {
+          var bin = "", u8 = new Uint8Array(ab); for (var i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+          resolve({ status: res.status, ctype: ct, body: btoa(bin) });
+        });
+      }).catch(reject);
+    });
+    return { promise: promise.then(function (r) { if (r.status < 400 && !/json|^text/.test(r.ctype || "")) r.b64 = r.body; return r; }), cancel: function () { if (A) A.cancel(id); } };
+  };
+  /** Native download of a URL with headers into Download/Shathi -> {path, uri} */
+  S.downloadTo = function (url, headers, name, mime) {
+    var id = "d" + S.uid();
+    return new Promise(function (resolve, reject) {
+      if (!A) { reject(new Error("download only in app")); return; }
+      pending[id] = { resolve: resolve, reject: reject, status: 0, body: "", buf: "" };
+      A.downloadTo(id, url, JSON.stringify(headers || {}), name, mime || "application/octet-stream");
+    }).then(function (r) { return { path: r.body, uri: r.uri }; });
+  };
+  /** Save a Blob to Download/Shathi in chunks -> {path, uri} */
+  S.saveBlob = function (blob, name, mime) {
+    if (!A) return Promise.resolve({ path: name, uri: URL.createObjectURL(blob) });
+    var h = A.fileBegin(), CH = 768 * 1024, off = 0;
+    var next = function () {
+      if (off >= blob.size) { var r = S.J(A.fileEnd(h, name, mime), {}); if (r.error) throw new Error(r.error); return r; }
+      var part = blob.slice(off, off + CH); off += CH;
+      return new Promise(function (res, rej) {
+        var fr = new FileReader(); fr.onload = function () { var r = S.J(A.fileAppend(h, String(fr.result).split(",")[1]), {}); if (r.error) rej(new Error(r.error)); else res(); };
+        fr.onerror = function () { rej(fr.error); }; fr.readAsDataURL(part);
+      }).then(next);
+    };
+    return Promise.resolve().then(next);
   };
 
   /** Line splitter for SSE streams: calls onEvent(jsonObject) for each `data:` line. */

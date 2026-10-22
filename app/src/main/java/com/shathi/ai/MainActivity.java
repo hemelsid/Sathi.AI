@@ -341,11 +341,19 @@ public class MainActivity extends Activity {
 
                     @Override
                     public void onDone(String id) {
+                        if (id.startsWith("f_")) {
+                            finishTtsFile(id);
+                            return;
+                        }
                         if (id.endsWith("#last")) js("__tts", "done", id);
                     }
 
                     @Override
                     public void onError(String id) {
+                        if (id.startsWith("f_")) {
+                            js("__ttsFile", id.substring(2), "", "error");
+                            return;
+                        }
                         js("__tts", "error", id);
                     }
                 });
@@ -353,6 +361,28 @@ public class MainActivity extends Activity {
             }
         };
         tts = ttsEngine.isEmpty() ? new TextToSpeech(this, l) : new TextToSpeech(this, l, ttsEngine);
+    }
+
+    private void finishTtsFile(final String uttId) {
+        pool.execute(new Runnable() {
+            @Override
+            public void run() {
+                String id = uttId.substring(2);
+                try {
+                    File f = new File(getCacheDir(), "tts_" + id + ".wav");
+                    FileInputStream in = new FileInputStream(f);
+                    ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                    byte[] buf = new byte[65536];
+                    int n;
+                    while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                    in.close();
+                    f.delete();
+                    js("__ttsFile", id, Base64.encodeToString(bo.toByteArray(), Base64.NO_WRAP), "");
+                } catch (Exception e) {
+                    js("__ttsFile", id, "", e.toString());
+                }
+            }
+        });
     }
 
     private Voice bestVoice(String lang) {
@@ -542,6 +572,49 @@ public class MainActivity extends Activity {
     }
 
     /** Save bytes into the public Download folder (MediaStore on Android 10+). Returns a display path. */
+    private String lastSavedUri = "";
+
+    private String saveFileToDownloads(File src, String name, String mime) throws Exception {
+        if (Build.VERSION.SDK_INT >= 29) {
+            ContentValues cv = new ContentValues();
+            cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            cv.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+            cv.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Shathi");
+            ContentResolver cr = getContentResolver();
+            Uri uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+            if (uri == null) throw new Exception("MediaStore insert failed");
+            OutputStream os = cr.openOutputStream(uri);
+            FileInputStream in = new FileInputStream(src);
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+            in.close();
+            os.close();
+            lastSavedUri = uri.toString();
+            return "Download/Shathi/" + name;
+        }
+        File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Shathi");
+        dir.mkdirs();
+        File f = new File(dir, name);
+        FileInputStream in = new FileInputStream(src);
+        FileOutputStream fo = new FileOutputStream(f);
+        byte[] buf = new byte[65536];
+        int n;
+        while ((n = in.read(buf)) > 0) fo.write(buf, 0, n);
+        in.close();
+        fo.close();
+        lastSavedUri = Uri.fromFile(f).toString();
+        return f.getAbsolutePath();
+    }
+
+    private String savedJson(String path) {
+        try {
+            return new JSONObject().put("path", path).put("uri", lastSavedUri).toString();
+        } catch (Exception e) {
+            return path;
+        }
+    }
+
     private String saveToDownloads(byte[] data, String name, String mime) throws Exception {
         if (Build.VERSION.SDK_INT >= 29) {
             ContentValues cv = new ContentValues();
@@ -554,6 +627,7 @@ public class MainActivity extends Activity {
             OutputStream os = cr.openOutputStream(uri);
             os.write(data);
             os.close();
+            lastSavedUri = uri.toString();
             return "Download/Shathi/" + name;
         }
         File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Shathi");
@@ -562,6 +636,7 @@ public class MainActivity extends Activity {
         FileOutputStream fo = new FileOutputStream(f);
         fo.write(data);
         fo.close();
+        lastSavedUri = Uri.fromFile(f).toString();
         return f.getAbsolutePath();
     }
 
@@ -788,6 +863,213 @@ public class MainActivity extends Activity {
                     } catch (Exception e) {
                         js("__net", id, "error", e.toString());
                     }
+                }
+            });
+        }
+
+        /** Like http() but the response body is delivered as base64 (for images/audio/video). Sends "ctype" first. */
+        @JavascriptInterface
+        public void httpBin(final String id, final String method, final String url, final String headersJson, final String body) {
+            pool.execute(new Runnable() {
+                @Override
+                public void run() {
+                    HttpURLConnection c = null;
+                    try {
+                        c = (HttpURLConnection) new URL(url).openConnection();
+                        live.put(id, c);
+                        c.setRequestMethod(method);
+                        c.setConnectTimeout(30000);
+                        c.setReadTimeout(300000);
+                        c.setInstanceFollowRedirects(true);
+                        c.setRequestProperty("User-Agent", "ShathiAI/2 (Android)");
+                        if (headersJson != null && headersJson.length() > 2) {
+                            JSONObject h = new JSONObject(headersJson);
+                            Iterator<String> it = h.keys();
+                            while (it.hasNext()) {
+                                String k = it.next();
+                                c.setRequestProperty(k, h.getString(k));
+                            }
+                        }
+                        if (body != null && body.length() > 0) {
+                            c.setDoOutput(true);
+                            OutputStream os = c.getOutputStream();
+                            os.write(body.getBytes("UTF-8"));
+                            os.close();
+                        }
+                        int code = c.getResponseCode();
+                        js("__net", id, "status", String.valueOf(code));
+                        String ct = c.getContentType();
+                        js("__net", id, "ctype", ct == null ? "" : ct);
+                        InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
+                        if (in == null) {
+                            js("__net", id, "end", String.valueOf(code));
+                            return;
+                        }
+                        ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                        byte[] buf = new byte[65536];
+                        int n;
+                        while ((n = in.read(buf)) > 0) {
+                            if (cancelled.containsKey(id)) break;
+                            bo.write(buf, 0, n);
+                        }
+                        in.close();
+                        if (code >= 400 || (ct != null && (ct.contains("json") || ct.startsWith("text")))) {
+                            js("__net", id, "body", new String(bo.toByteArray(), "UTF-8"));
+                        } else {
+                            js("__net", id, "body", Base64.encodeToString(bo.toByteArray(), Base64.NO_WRAP));
+                        }
+                        js("__net", id, "end", String.valueOf(code));
+                    } catch (Exception e) {
+                        js("__net", id, "error", e.getClass().getSimpleName() + ": " + e.getMessage());
+                    } finally {
+                        live.remove(id);
+                        if (c != null) c.disconnect();
+                    }
+                }
+            });
+        }
+
+        /** Download a URL (optionally with headers) straight into Download/Shathi. Result: __net(id,"saved",{path,uri}). */
+        @JavascriptInterface
+        public void downloadTo(final String id, final String url, final String headersJson, final String name, final String mime) {
+            pool.execute(new Runnable() {
+                @Override
+                public void run() {
+                    HttpURLConnection c = null;
+                    File tmp = new File(getCacheDir(), "dl_" + id);
+                    try {
+                        c = (HttpURLConnection) new URL(url).openConnection();
+                        live.put(id, c);
+                        c.setConnectTimeout(30000);
+                        c.setReadTimeout(600000);
+                        c.setInstanceFollowRedirects(true);
+                        if (headersJson != null && headersJson.length() > 2) {
+                            JSONObject h = new JSONObject(headersJson);
+                            Iterator<String> it = h.keys();
+                            while (it.hasNext()) {
+                                String k = it.next();
+                                c.setRequestProperty(k, h.getString(k));
+                            }
+                        }
+                        int code = c.getResponseCode();
+                        if (code >= 400) {
+                            InputStream es = c.getErrorStream();
+                            js("__net", id, "error", "HTTP " + code + " " + (es == null ? "" : readAll(es)));
+                            return;
+                        }
+                        String ct = c.getContentType();
+                        if (ct != null && (ct.contains("json") || ct.startsWith("text"))) {
+                            js("__net", id, "error", "Not a media file: " + readAll(c.getInputStream()));
+                            return;
+                        }
+                        InputStream in = c.getInputStream();
+                        FileOutputStream fo = new FileOutputStream(tmp);
+                        byte[] buf = new byte[65536];
+                        int n;
+                        long total = 0;
+                        while ((n = in.read(buf)) > 0) {
+                            if (cancelled.containsKey(id)) break;
+                            fo.write(buf, 0, n);
+                            total += n;
+                        }
+                        fo.close();
+                        in.close();
+                        if (total < 1000) {
+                            js("__net", id, "error", "File too small (" + total + " bytes)");
+                            return;
+                        }
+                        String path = saveFileToDownloads(tmp, name.replaceAll("[\\\\/:*?\"<>|]", "_"), mime);
+                        js("__net", id, "saved", savedJson(path));
+                    } catch (Exception e) {
+                        js("__net", id, "error", e.toString());
+                    } finally {
+                        tmp.delete();
+                        live.remove(id);
+                        if (c != null) c.disconnect();
+                    }
+                }
+            });
+        }
+
+        // ---------- chunked binary save (videos rendered in the page) ----------
+        @JavascriptInterface
+        public String fileBegin() {
+            String h = "chunk_" + System.currentTimeMillis();
+            new File(getCacheDir(), h).delete();
+            return h;
+        }
+
+        @JavascriptInterface
+        public String fileAppend(String handle, String b64) {
+            if (!handle.matches("chunk_\\d+")) return err("bad handle");
+            try {
+                FileOutputStream fo = new FileOutputStream(new File(getCacheDir(), handle), true);
+                fo.write(Base64.decode(b64, Base64.DEFAULT));
+                fo.close();
+                return ok();
+            } catch (Exception e) {
+                return err(e.toString());
+            }
+        }
+
+        @JavascriptInterface
+        public String fileEnd(String handle, String name, String mime) {
+            if (!handle.matches("chunk_\\d+")) return err("bad handle");
+            File f = new File(getCacheDir(), handle);
+            try {
+                String path = saveFileToDownloads(f, name.replaceAll("[\\\\/:*?\"<>|]", "_"), mime);
+                return savedJson(path);
+            } catch (Exception e) {
+                return err(e.toString());
+            } finally {
+                f.delete();
+            }
+        }
+
+        @JavascriptInterface
+        public String openUri(String uri, String mime) {
+            try {
+                Intent i = new Intent(Intent.ACTION_VIEW);
+                i.setDataAndType(Uri.parse(uri), mime);
+                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                return startSafe(i) ? ok() : err("No app to open this file");
+            } catch (Exception e) {
+                return err(e.toString());
+            }
+        }
+
+        @JavascriptInterface
+        public String shareUri(String uri, String mime) {
+            try {
+                Intent i = new Intent(Intent.ACTION_SEND);
+                i.setType(mime);
+                i.putExtra(Intent.EXTRA_STREAM, Uri.parse(uri));
+                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                return startSafe(Intent.createChooser(i, "শেয়ার করুন")) ? ok() : err("share failed");
+            } catch (Exception e) {
+                return err(e.toString());
+            }
+        }
+
+        /** Synthesize speech to a WAV file; result via __ttsFile(id, base64, error). */
+        @JavascriptInterface
+        public void ttsToFile(final String id, final String text, final String lang, final float rate) {
+            ui.post(new Runnable() {
+                @Override
+                public void run() {
+                    ensureTts(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (!setLang(lang)) {
+                                js("__ttsFile", id, "", "no_voice");
+                                return;
+                            }
+                            tts.setSpeechRate(rate <= 0 ? 1.0f : rate);
+                            File f = new File(getCacheDir(), "tts_" + id + ".wav");
+                            int r = tts.synthesizeToFile(text, null, f, "f_" + id);
+                            if (r != TextToSpeech.SUCCESS) js("__ttsFile", id, "", "synth failed");
+                        }
+                    });
                 }
             });
         }

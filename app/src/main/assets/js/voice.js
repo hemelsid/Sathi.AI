@@ -161,8 +161,11 @@
       audioEl.play().catch(function () { W.__tts("error"); });
     });
   }
-  function aiSpeak(text) {
+  function aiSpeak(text) { return V.aiAudio(text).then(playSrc); }
+  /** Natural Gemini voice -> wav data URL */
+  V.aiAudio = function (text) {
     var g = S.providers.find("gemini");
+    if (!g) return Promise.reject(new Error("no gemini"));
     var models = (g.allModels || []).filter(function (m) { return /tts/.test(m); });
     if (!models.length) models = ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts", "gemini-2.5-flash-preview-tts"];
     models.sort(function (a, b) { return (/lite/.test(a) ? 1 : 0) - (/lite/.test(b) ? 1 : 0); });
@@ -191,6 +194,6 @@
         })
         .catch(function () { return tryOne(i + 1); });
     };
-    return tryOne(0).then(playSrc);
-  }
+    return tryOne(0);
+  };
 })(window);

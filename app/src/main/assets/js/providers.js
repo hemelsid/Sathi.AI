@@ -21,8 +21,14 @@
     { id: "github", name: "GitHub Models", type: "openai", base: "https://models.github.ai/inference", tier: "free",
       keyUrl: "https://github.com/settings/tokens", icon: "GH", color: "#24292F",
       note: "GitHub টোকেন (models অনুমতি) দিয়ে ফ্রি।", listUrl: "https://models.github.ai/catalog/models" },
-    { id: "pollinations", name: "Pollinations", type: "openai", base: "https://gen.pollinations.ai/v1", tier: "free",
-      keyUrl: "https://enter.pollinations.ai", icon: "🌸", color: "#3FB950", note: "ফ্রি লেখা ও ছবি বানানো।" },
+    { id: "pollinations", name: "Pollinations", type: "openai", base: "https://gen.pollinations.ai/v1", tier: "free", media: true,
+      keyUrl: "https://enter.pollinations.ai", icon: "🌸", color: "#3FB950", note: "ফ্রি key-তে ছবি, AI ভিডিও আর চ্যাট (দৈনিক সীমিত)।" },
+    { id: "cloudflare", name: "Cloudflare (ছবি)", type: "cloudflare", base: "https://api.cloudflare.com/client/v4", tier: "free", media: true, mediaOnly: true,
+      keyUrl: "https://dash.cloudflare.com/?to=/:account/ai/workers-ai", icon: "☁", color: "#F38020", needsAccount: true,
+      note: "ফ্রি: দিনে ~২০০+ ছবি (FLUX)। Account ID আর API token লাগে।" },
+    { id: "huggingface", name: "Hugging Face (ছবি)", type: "hf", base: "https://router.huggingface.co", tier: "free", media: true, mediaOnly: true,
+      keyUrl: "https://huggingface.co/settings/tokens", icon: "🤗", color: "#FFB000",
+      note: "ফ্রি মাসিক ক্রেডিটে FLUX ছবি।" },
     { id: "openai", name: "OpenAI (ChatGPT)", type: "openai", base: "https://api.openai.com/v1", tier: "premium",
       keyUrl: "https://platform.openai.com/api-keys", icon: "◐", color: "#10A37F", note: "পেইড। GPT মডেল, ছবি বানানো, Whisper।" },
     { id: "anthropic", name: "Anthropic Claude", type: "anthropic", base: "https://api.anthropic.com/v1", tier: "premium",
@@ -89,6 +95,14 @@
 
   /* ---------------- list models ---------------- */
   S.listModels = function (p) {
+    if (p.type === "cloudflare") {
+      if (!p.accountId) return Promise.reject(new Error("Account ID দিন"));
+      return S.getJSON(base(p) + "/accounts/" + encodeURIComponent(p.accountId) + "/ai/models/search?task=Text-to-Image&per_page=50", { Authorization: "Bearer " + p.key })
+        .then(function (d) { p.imageModels = (d.result || []).map(function (m) { return m.name; }); return []; });
+    }
+    if (p.type === "hf") {
+      return S.getJSON("https://huggingface.co/api/whoami-v2", { Authorization: "Bearer " + p.key }).then(function () { return []; });
+    }
     if (p.type === "gemini") {
       return S.getJSON(base(p) + "/models?pageSize=300", authHeaders(p)).then(function (d) {
         var all = (d.models || []).map(function (m) {

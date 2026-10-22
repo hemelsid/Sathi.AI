@@ -132,9 +132,42 @@
           });
       } },
     { name: "generate_image", group: "chat", label: "🎨 ছবি আঁকছে",
-      description: "Create an image from a text description (illustrations, posters, logos, art, photos). Write the prompt in English, detailed. The image is shown to the user automatically.",
-      parameters: obj({ prompt: str("Detailed English description"), aspect: str("square | portrait | landscape") }, ["prompt"]),
-      run: function (a, ctx) { return S.generateImage(a.prompt, a.aspect || "square", ctx); } },
+      description: "Create image(s) from a description: illustrations, photos, posters, logos, art, thumbnails. Write the prompt in detailed English (subject, setting, composition, lighting, colors, mood). Images are shown to the user and saved automatically. ONLY say an image was created if this returns ok:true.",
+      parameters: obj({ prompt: str("Detailed English description"), aspect: str("square | portrait | landscape"),
+        style: str("auto | photo | cinematic | cartoon | anime | 3d | painting | watercolor | sketch | logo | poster"), count: num("1-4, default 1") }, ["prompt"]),
+      run: function (a, ctx) {
+        return S.media.makeImages(a.prompt, { aspect: a.aspect || "square", style: a.style || "auto", count: a.count || 1,
+          onStatus: function (t) { ctx && ctx.progress && ctx.progress(t); } })
+          .then(function (list) {
+            return Promise.all(list.map(S.media.finalizeImage)).then(function (fin) {
+              fin.forEach(function (f) { if (ctx && ctx.addImage) ctx.addImage(f.preview, f); });
+              return { ok: true, created: fin.length, provider: fin[0].provider, saved_to: fin.map(function (f) { return f.path; }).filter(Boolean),
+                note: "Images are displayed to the user. Describe briefly; don't paste URLs." };
+            });
+          }, function (e) {
+            if (ctx && ctx.needSetup) ctx.needSetup("image", e.message);
+            return { ok: false, error: e.message, tell_user: "Image was NOT created. Explain briefly and say a free image service (Cloudflare, Pollinations or Hugging Face key) can be added from the button shown." };
+          });
+      } },
+    { name: "generate_video", group: "chat", label: "🎬 AI ভিডিও বানাচ্ছে",
+      description: "Generate a short AI video clip (4-8 s) from a detailed English prompt (scene, action, camera movement, style, sound). Needs a video service; if none works, it automatically makes a free narrated story video instead. ONLY claim success if ok:true.",
+      parameters: obj({ prompt: str("Detailed English video prompt"), duration: num("seconds 4-8"), aspect: str("landscape | portrait"), audio: { type: "boolean", description: "with sound" } }, ["prompt"]),
+      run: function (a, ctx) {
+        var st = function (t) { ctx && ctx.progress && ctx.progress(t); };
+        return S.media.makeAIVideo(a.prompt, { duration: a.duration || 6, aspect: a.aspect || "landscape", audio: a.audio !== false }, st).then(function (v) {
+          if (ctx && ctx.addVideo) ctx.addVideo({ uri: v.uri, path: v.path, title: a.prompt.slice(0, 60), mime: "video/mp4" });
+          return { ok: true, kind: "ai_video", provider: v.provider, saved_to: v.path };
+        }, function (e) {
+          st("AI ভিডিও হয়নি → ফ্রি স্টোরি ভিডিও বানাচ্ছি");
+          return S.tools_storyVideo({ topic: a.prompt, scenes: 4, aspect: a.aspect === "portrait" ? "portrait" : "landscape", narration: true }, ctx)
+            .then(function (r) { r.ai_video_error = e.message; r.note = "AI video service unavailable (" + e.message + "), so a free narrated story video was made instead. Tell the user this honestly."; return r; });
+        });
+      } },
+    { name: "make_story_video", group: "chat", label: "🎞 স্টোরি ভিডিও বানাচ্ছে",
+      description: "Make a FREE narrated video on the phone: writes a script, draws a picture for each scene, adds Bangla voice narration, captions, music and smooth motion. Great for stories, explainers, reels, birthday wishes, ads, lessons. Takes 1-3 minutes. ONLY claim success if ok:true.",
+      parameters: obj({ topic: str("What the video is about (any language), with any details the user gave"), scenes: num("3-10, default 5"),
+        aspect: str("portrait (reels) | landscape | square"), style: str("visual style id, e.g. cartoon, photo, anime, 3d, watercolor"), narration: { type: "boolean", description: "voice narration, default true" } }, ["topic"]),
+      run: function (a, ctx) { return S.tools_storyVideo(a, ctx); } },
     { name: "remember", group: "chat", label: "🧠 মনে রাখছে",
       description: "Save a lasting fact about the user (name, preferences, job, family, goals) when they share it or ask you to remember. Keep it short.",
       parameters: obj({ fact: str("Short fact, in Bangla") }, ["fact"]),
@@ -236,7 +269,17 @@
     });
   };
 
-  /* ---------- image generation: Gemini image → OpenAI → Pollinations ---------- */
+  S.tools_storyVideo = function (a, ctx) {
+    return S.media.storyVideo(a.topic, { scenes: a.scenes || 5, aspect: a.aspect || "portrait", style: a.style, narration: a.narration !== false },
+      function (t) { ctx && ctx.progress && ctx.progress(t); })
+      .then(function (v) {
+        if (ctx && ctx.addVideo) ctx.addVideo({ uri: v.uri, path: v.path, blob: v.blob, title: v.title, mime: v.mime.split(";")[0] });
+        return { ok: true, kind: "story_video", title: v.title, scenes: v.scenes, seconds: Math.round(v.duration), narrated: v.narrated,
+          ai_images: v.images, saved_to: v.path, note: v.note || undefined };
+      }, function (e) { return { ok: false, error: e.message }; });
+  };
+
+  /* ---------- (legacy) image generation ---------- */
   S.generateImage = function (prompt, aspect, ctx) {
     var tries = [];
     var g = S.providers.find("gemini");
