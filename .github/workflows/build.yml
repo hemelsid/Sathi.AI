@@ -10,16 +10,19 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
+      - name: Check Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools" || echo "::error::Android SDK missing on runner"
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -29,7 +32,11 @@ jobs:
         env:
           BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          gradle --no-daemon :app:assembleRelease
+          set -o pipefail
+          if ! gradle --no-daemon :app:assembleRelease 2>&1 | tee build.log; then
+            grep -E "error|What went wrong|FAILURE|Could not|>" build.log | head -15 | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          fi
           ls -la app/build/outputs/apk/release/
           cp app/build/outputs/apk/release/app-release-unsigned.apk ShathiAI-unsigned.apk
 
