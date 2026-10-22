@@ -1,0 +1,28 @@
+plugins { id "com.android.application" }
+
+android {
+    namespace "com.shathi.ai"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.shathi.ai"
+        minSdk 24
+        targetSdk 30
+        versionCode Integer.parseInt(System.getenv("BUILD_NUMBER") ?: "2")
+        versionName "1.1." + (System.getenv("BUILD_NUMBER") ?: "0")
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Unsigned here on purpose: the signing key is kept off this public repo.
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    lint { abortOnError false; checkReleaseBuilds false }
+}

@@ -1,0 +1,50 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+
+      - name: Build APK (unsigned)
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          gradle --no-daemon :app:assembleRelease
+          ls -la app/build/outputs/apk/release/
+          cp app/build/outputs/apk/release/app-release-unsigned.apk ShathiAI-unsigned.apk
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShathiAI-unsigned
+          path: ShathiAI-unsigned.apk
+
+      - name: Publish unsigned build
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "Build #${{ github.run_number }} (unsigned)"
+          body: "Unsigned build output. The installable, signed APK is published in the 'latest' release."
+          files: ShathiAI-unsigned.apk
+          prerelease: true
+          make_latest: false
