@@ -248,7 +248,7 @@
   }
 
   /* ---------------- errors ---------------- */
-  function ProviderError(msg, kind, status) { var e = new Error(msg); e.kind = kind; e.status = status; return e; }
+  function ProviderError(msg, kind, status, raw) { var e = new Error(msg); e.kind = kind; e.status = status; e.raw = raw; return e; }
   S.ProviderError = ProviderError;
   function classify(status, body, p) {
     var t = String(body || "");
@@ -264,7 +264,7 @@
     if (/location is not supported|user location/i.test(t)) return ProviderError(p.name + ": আপনার এলাকায় এই সেবা নেই।", "region", status);
     if (status >= 500) return ProviderError(p.name + ": সার্ভারে সমস্যা (" + status + ")।", "server", status);
     var m = /"message"\s*:\s*"([^"]{0,200})/.exec(t);
-    return ProviderError(p.name + ": " + (m ? m[1] : "HTTP " + status), "other", status);
+    return ProviderError(p.name + ": " + (m ? m[1] : "HTTP " + status), "other", status, t.slice(0, 400));
   }
 
   /**
@@ -274,17 +274,42 @@
    */
   S.callModel = function (o) {
     var p = o.p;
-    if (p.type === "gemini") return callGemini(o);
+    if (p.type === "gemini") return callGemini(o).catch(function (e) {
+      if (!p.noThinkCfg && e.status === 400 && /think/i.test(e.raw || e.message)) { p.noThinkCfg = true; return callGemini(o); }
+      throw e;
+    });
     if (p.type === "anthropic") return callAnthropic(o);
     return callOpenAI(o);
   };
 
+  S.speed = S.store ? S.store.load("speed", {}) : {};
+  var saveSpeed = S.debounce ? S.debounce(function () { S.store.save("speed", S.speed); }, 2000) : function () {};
+  function speedRecord(pid, ms) { var o = S.speed[pid]; S.speed[pid] = o ? Math.round(o * 0.6 + ms * 0.4) : ms; saveSpeed(); }
   function run(o, req, parse) {
     var acc = { text: "", calls: [], raw: [], done: false };
+    var t0 = Date.now(), first = 0, lastData = Date.now(), timedOut = false;
+    var firstLimit = o.firstTimeout || S._firstTimeout || (o.hasFiles ? 45000 : 25000), idleLimit = S._idleTimeout || 30000;
     var h = S.http({ method: "POST", url: req.url, headers: req.headers, body: req.body, stream: true,
-      onChunk: S.sse(function (ev) { parse(ev, acc); if (o.onText) o.onText(acc.text); }) });
-    if (o.signal) o.signal.handle = h;
+      onChunk: S.sse(function (ev) {
+        lastData = Date.now();
+        parse(ev, acc);
+        if (!first && (acc.text || acc.calls.length || acc.thinking)) { first = Date.now(); speedRecord(o.p.id, first - t0); if (o.onFirst) o.onFirst(first - t0); }
+        if (o.onText) o.onText(acc.text);
+      }) });
+    if (o.signal) { o.signal.handle = h; o.signal.skip = function () { timedOut = "skip"; h.cancel(); }; }
+    // watchdog: give up on a silent server instead of waiting minutes
+    var dog = setInterval(function () {
+      var now = Date.now();
+      if ((!first && now - t0 > firstLimit) || (first && now - lastData > idleLimit)) { timedOut = true; clearInterval(dog); h.cancel(); }
+    }, 1000);
+    var stop = function () { clearInterval(dog); };
     return h.promise.then(function (r) {
+      stop();
+      if (timedOut && !(o.signal && o.signal.cancelled)) {
+        speedRecord(o.p.id, 60000);
+        if (acc.text && timedOut !== "skip") return acc; // keep what arrived
+        throw ProviderError(timedOut === "skip" ? o.p.name + ": বাদ দেওয়া হলো" : o.p.name + ": সাড়া দিচ্ছে না (খুব ধীর)", "slow", 0);
+      }
       if (S.usage) S.usage.record(o.p, o.model, "chat", { ok: r.status < 400, status: r.status, headers: r.headers, usage: acc.usage, body: r.status >= 400 ? r.body : "" });
       if (o.signal && o.signal.cancelled) { acc.cancelled = true; return acc; }
       if (r.status >= 400) throw classify(r.status, r.body, o.p);
@@ -292,7 +317,9 @@
       if (acc.error) throw classify(acc.error.status || 400, JSON.stringify(acc.error), o.p);
       return acc;
     }, function (e) {
+      stop();
       if (o.signal && o.signal.cancelled) { acc.cancelled = true; return acc; }
+      if (timedOut) { speedRecord(o.p.id, 60000); throw ProviderError(timedOut === "skip" ? o.p.name + ": বাদ দেওয়া হলো" : o.p.name + ": সাড়া দিচ্ছে না (খুব ধীর)", "slow", 0); }
       var m = String(e.message || e);
       S.unreachable = S.unreachable || {}; S.unreachable[o.p.id] = Date.now();
       throw ProviderError(/timed? ?out|ETIMEDOUT|connect|UnknownHost|unreachable|reset/i.test(m)
@@ -306,6 +333,8 @@
       contents: toGemini(o.msgs),
       generationConfig: { temperature: o.temperature == null ? 0.7 : o.temperature }
     };
+    if (!p.noThinkCfg && /gemini-(3|flash-latest|flash-lite-latest)/.test(o.model) && !/image|tts/.test(o.model))
+      body.generationConfig.thinkingConfig = { thinkingLevel: o.deep ? "high" : "low" };
     if (o.system) body.systemInstruction = { parts: [{ text: o.system }] };
     var tools = [];
     if (o.tools && o.tools.length) tools.push({ functionDeclarations: o.tools.map(function (t) {

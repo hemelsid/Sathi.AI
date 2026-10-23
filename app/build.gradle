@@ -9,7 +9,7 @@ android {
         minSdk 24
         targetSdk 30
         versionCode Integer.parseInt(System.getenv("BUILD_NUMBER") ?: "2")
-        versionName "2.2." + (System.getenv("BUILD_NUMBER") ?: "0")
+        versionName "2.3." + (System.getenv("BUILD_NUMBER") ?: "0")
     }
 
     buildTypes {

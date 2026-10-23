@@ -10,7 +10,7 @@
   var DEF = {
     v: 2, providers: [], defaultModel: "auto", customModels: [], profile: "", memoryOn: true,
     voice: { input: "auto", output: "device", rate: 1.0, autoSpeak: false, lang: "bn", aiVoice: "Kore" },
-    agent: { confirmFiles: true, maxSteps: 16 }, theme: "dark"
+    agent: { confirmFiles: true, maxSteps: 16 }, theme: "dark", speedFirst: true
   };
   function merge(d, o) {
     var r = JSON.parse(JSON.stringify(d));
@@ -124,7 +124,13 @@
         }
         return { p: p, model: m };
       }).filter(function (r) { return r.model; })
-      .sort(function (a, b) { return (S.usage.of(a.p, a.model).pct === 100 ? 1 : 0) - (S.usage.of(b.p, b.model).pct === 100 ? 1 : 0); })
+      .sort(function (a, b) {
+        var lim = function (r) { return S.usage.of(r.p, r.model).pct === 100 ? 1 : 0; };
+        if (lim(a) !== lim(b)) return lim(a) - lim(b);
+        if (!S.settings.speedFirst) return 0;
+        var sp = function (r) { return (S.speed || {})[r.p.id] || 4000; };
+        return sp(a) - sp(b);
+      })
       // providers that just failed to connect go last for 5 minutes
       .sort(function (a, b) {
         var u = S.unreachable || {}, now = Date.now();
@@ -181,6 +187,30 @@
     return L.join("\n\n");
   }
 
+  /* Send less: recent messages only, old attachments and long tool results shortened. */
+  function compactHistory(msgs) {
+    var MAX = 24, start = Math.max(0, msgs.length - MAX);
+    while (start > 0 && msgs[start].role !== "user") start--;           // begin at a user message
+    var out = msgs.slice(start), userIdx = [];
+    out.forEach(function (m, i) { if (m.role === "user") userIdx.push(i); });
+    var keepFilesFrom = userIdx.length > 2 ? userIdx[userIdx.length - 2] : 0;   // files only for the last 2 user messages
+    var lastUser = userIdx.length ? userIdx[userIdx.length - 1] : 0;
+    return out.map(function (m, i) {
+      if (m.role === "user" && m.files && m.files.length && i < keepFilesFrom) {
+        var c = { role: "user", text: m.text, files: m.files.map(function (f) { return { name: f.name, mime: f.mime, note: "[আগে পাঠানো ফাইল: " + f.name + "]" }; }) };
+        return c;
+      }
+      if (m.role === "tool" && i < lastUser) {
+        return { role: "tool", results: m.results.map(function (r) {
+          var t = JSON.stringify(r.result || {});
+          return { id: r.id, name: r.name, result: t.length > 1500 ? { summary: t.slice(0, 1500) + "…" } : r.result };
+        }) };
+      }
+      return m;
+    });
+  }
+  S._compact = compactHistory;
+
   /* =========================================================
    * agent loop
    * ========================================================= */
@@ -207,9 +237,11 @@
       if (steps++ >= maxSteps) { ui.turnNote(turn, "অনেকগুলো ধাপ হয়ে গেছে, এখানে থামলাম। \"চালিয়ে যাও\" লিখলে আবার শুরু করবে।"); return Promise.resolve(); }
       var route = routes[ri];
       var tools = noTools[route.p.id + route.model] ? [] : S.toolsFor(conv.agent ? "agent" : "chat");
-      var live = ui.liveText(turn, route);
-      return S.callModel({ p: route.p, model: route.model, system: systemPrompt(conv, route), msgs: conv.msgs, tools: tools,
-        temperature: temp, signal: signal, onText: function (t) { live.update(t); } })
+      var live = ui.liveText(turn, route, function () { if (signal.skip) signal.skip(); }, ri + 1 < routes.length);
+      var sendMsgs = compactHistory(conv.msgs);
+      var hasFiles = sendMsgs.some(function (m) { return m.files && m.files.some(function (f) { return f.b64; }); });
+      return S.callModel({ p: route.p, model: route.model, system: systemPrompt(conv, route), msgs: sendMsgs, tools: tools,
+        temperature: temp, signal: signal, hasFiles: hasFiles, onText: function (t) { live.update(t); } })
         .then(function (r) {
           live.done();
           if (r.cancelled && !r.text && !r.calls.length) return;
@@ -225,6 +257,7 @@
           live.done(true);
           if (signal.cancelled) return;
           if (e.kind === "notools" && !noTools[route.p.id + route.model]) { noTools[route.p.id + route.model] = 1; steps--; return step(); }
+          if (e.kind === "slow") { S.unreachable = S.unreachable || {}; S.unreachable[route.p.id] = Date.now(); }
           if (e.kind === "model" && route.p.working === route.model) { route.p.working = ""; saveSettings(); }
           if (route.p.type === "gemini" && (e.kind === "model" || e.kind === "limit" || e.kind === "server")) {
             // each Gemini model has its own free quota: try other Gemini models before leaving Gemini
@@ -363,19 +396,26 @@
       '<span class="via"></span></div><div class="tbody"></div>';
     chat.appendChild(t); scrollEnd(true); return t;
   };
-  ui.liveText = function (turn, route) {
+  ui.liveText = function (turn, route, onSkip, canSkip) {
     var body = $(".tbody", turn), el = document.createElement("div"), think = document.createElement("div");
     $(".via", turn).textContent = "· " + shortModel(route.model);
-    think.className = "thinking"; think.innerHTML = '<span class="dots"><i></i><i></i><i></i></span><span>ভাবছে…</span>';
+    think.className = "thinking"; think.innerHTML = '<span class="dots"><i></i><i></i><i></i></span><span class="tl">ভাবছে…</span><button class="skipb" hidden>⏭ অন্য মডেল</button>';
     body.appendChild(think); scrollEnd();
+    var started = Date.now(), tick = setInterval(function () {
+      var sec = Math.round((Date.now() - started) / 1000);
+      if (sec >= 3) $(".tl", think).textContent = "ভাবছে… " + S.bnNum(sec) + " সে." + (sec >= 10 ? " (" + route.p.name + " ধীর)" : "");
+      if (sec >= 7 && canSkip && onSkip) $(".skipb", think).hidden = false;
+    }, 1000);
+    $(".skipb", think).onclick = function () { $(".skipb", think).hidden = true; onSkip && onSkip(); };
     el.className = "md live cursor"; var shown = false, pendingT = null, raf = 0;
     var flush = function () { raf = 0; if (pendingT == null) return; el.innerHTML = S.md(pendingT); scrollEnd(); };
     return {
       update: function (t) {
-        if (!shown && t) { think.remove(); body.appendChild(el); shown = true; }
-        pendingT = t; if (!raf) raf = setTimeout(flush, 70);
+        if (!shown && t) { clearInterval(tick); think.remove(); body.appendChild(el); shown = true; }
+        // long answers: render less often so the phone stays smooth
+        pendingT = t; if (!raf) raf = setTimeout(flush, 60 + Math.min(400, (t || "").length / 25));
       },
-      done: function () { clearTimeout(raf); think.remove(); el.remove(); }
+      done: function () { clearInterval(tick); clearTimeout(raf); think.remove(); el.remove(); }
     };
   };
   var ELS = new WeakMap();
@@ -1423,6 +1463,7 @@
       var gp = el("div", { className: "group" }); b.appendChild(gp);
       switchRow(gp, "সাথী অটো পেইড মডেলও ব্যবহার করবে", "বন্ধ থাকলে অটো শুধু ফ্রি/সীমিত ফ্রি মডেল ব্যবহার করে — ভুলে টাকা কাটবে না", st.autoPaid, function (v) { st.autoPaid = v; saveSettings(); });
       switchRow(gp, "মডেলের তালিকায় শুধু ফ্রি দেখাও", "", st.onlyFree, function (v) { st.onlyFree = v; saveSettings(); });
+      switchRow(gp, "⚡ দ্রুততম মডেল আগে", "সাথী অটো মেপে দেখে কোন AI আপনার নেটে সবচেয়ে দ্রুত উত্তর দেয়, সেটাই আগে ব্যবহার করে", st.speedFirst, function (v) { st.speedFirst = v; saveSettings(); });
 
       b.appendChild(el("div", { className: "gtitle", text: "এজেন্ট" }));
       var g3 = el("div", { className: "group" }); b.appendChild(g3);
