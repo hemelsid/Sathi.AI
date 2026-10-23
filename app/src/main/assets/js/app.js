@@ -619,7 +619,13 @@
     SUGS.forEach(function (x) {
       var b = document.createElement("button"); b.className = "sug";
       b.innerHTML = "<b>" + x[0] + " " + esc(x[1]) + "</b><span>" + esc(x[2].slice(0, 46)) + "…</span>";
-      b.onclick = function () { if (x[3] && !cur.agent) { cur.agent = true; $("#agentBtn").setAttribute("aria-pressed", "true"); } send(x[2]); };
+      b.onclick = function () {
+        // only fill the box — the user edits if needed and taps the arrow to start
+        if (x[3] && !cur.agent) { cur.agent = true; $("#agentBtn").setAttribute("aria-pressed", "true"); S.toast("🛠 এজেন্ট মোড চালু হলো"); }
+        input.value = x[2]; autosize(); input.focus();
+        try { input.setSelectionRange(input.value.length, input.value.length); } catch (e) {}
+        $$(".sug", g).forEach(function (y) { y.classList.remove("picked"); }); b.classList.add("picked");
+      };
       g.appendChild(b);
     });
     w.appendChild(g); chat.appendChild(w);
