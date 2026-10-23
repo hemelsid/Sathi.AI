@@ -73,10 +73,11 @@
     var p = pending[id]; if (!p) return;
     if (type === "status") p.status = parseInt(data, 10);
     else if (type === "ctype") p.ctype = data;
+    else if (type === "headers") p.headers = S.J(data, {});
     else if (type === "chunk") { p.buf += data; if (p.onChunk && p.status < 400) p.onChunk(data); else p.body += data; }
     else if (type === "body") p.body += data;
     else if (type === "saved") { delete pending[id]; var sv = S.J(data, null); p.resolve({ status: 200, body: sv ? sv.path : data, uri: sv ? sv.uri : "" }); }
-    else if (type === "end") { delete pending[id]; p.resolve({ status: p.status || parseInt(data, 10) || 0, body: p.body, ctype: p.ctype || "" }); }
+    else if (type === "end") { delete pending[id]; p.resolve({ status: p.status || parseInt(data, 10) || 0, body: p.body, ctype: p.ctype || "", headers: p.headers || {} }); }
     else if (type === "error") { delete pending[id]; p.reject(new Error(data)); }
   };
 

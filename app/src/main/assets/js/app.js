@@ -19,6 +19,18 @@
   }
   S.settings = merge(DEF, S.store.load("settings", {}));
   var saveSettings = S.debounce(function () { S.store.save("settings", S.settings); }, 300);
+  (function dedupe() {
+    var seen = {}, out = [];
+    S.settings.providers.forEach(function (p) {
+      var k = p.preset === "custom" || p.preset === "ollama" ? p.id : p.preset;
+      var prev = seen[k];
+      if (!prev) { seen[k] = p; out.push(p); return; }
+      // keep the more complete one
+      var score = function (x) { return (x.key ? 2 : 0) + (x.accountId ? 1 : 0) + ((x.models || []).length ? 1 : 0); };
+      if (score(p) > score(prev)) { out[out.indexOf(prev)] = p; seen[k] = p; }
+    });
+    if (out.length !== S.settings.providers.length) { S.settings.providers = out; S.store.save("settings", S.settings); }
+  })();
   S.saveSettings = saveSettings;
 
   S.providers = {
@@ -104,8 +116,15 @@
    * ========================================================= */
   function customById(id) { for (var i = 0; i < S.settings.customModels.length; i++) if (S.settings.customModels[i].id === id) return S.settings.customModels[i]; return null; }
   function autoRoutes() {
-    return S.providers.usable().filter(function (p) { return !S.preset(p.preset).mediaOnly; }).slice().sort(function (a, b) { return ORDER.indexOf(a.preset) - ORDER.indexOf(b.preset); })
-      .map(function (p) { return { p: p, model: S.pickModel(p) }; }).filter(function (r) { return r.model; })
+    return S.providers.usable().filter(function (p) { return !S.preset(p.preset).mediaOnly && (S.settings.autoPaid || S.preset(p.preset).tier !== "premium"); }).slice().sort(function (a, b) { return ORDER.indexOf(a.preset) - ORDER.indexOf(b.preset); })
+      .map(function (p) {
+        var m = S.pickModel(p);
+        if (m && !S.settings.autoPaid && S.modelTier(p, m).tier === "paid") {
+          var alt = S.chatModels(p).filter(function (x) { return S.modelTier(p, x).tier !== "paid"; })[0]; m = alt || "";
+        }
+        return { p: p, model: m };
+      }).filter(function (r) { return r.model; })
+      .sort(function (a, b) { return (S.usage.of(a.p, a.model).pct === 100 ? 1 : 0) - (S.usage.of(b.p, b.model).pct === 100 ? 1 : 0); })
       // providers that just failed to connect go last for 5 minutes
       .sort(function (a, b) {
         var u = S.unreachable || {}, now = Date.now();
@@ -146,7 +165,7 @@
     }
     L.push("Current date/time: " + now.toLocaleString("en-GB", { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }) +
       " (" + Intl.DateTimeFormat().resolvedOptions().timeZone + "). Running on model " + route.model + " via " + route.p.name + ".");
-    L.push("Guidelines:\n- Answer directly and helpfully; match length to the question.\n- Use tools whenever they make the answer more correct or current: web_search for news/prices/facts you are unsure of (then cite 1-3 sources as markdown links), calculate/run_code for math, weather, currency, wikipedia, generate_image when asked to draw/create a picture.\n- Never invent facts, numbers, links or quotes. If unsure, search or say so.\n- If the user shares a lasting personal fact or asks you to remember something, call remember.\n- Images: call generate_image with a rich English prompt (pick a fitting style/aspect; count up to 4 for options). Videos: generate_video for a short realistic AI clip; make_story_video for stories, explainers, reels, wishes or ads with narration (free). Ask nothing first unless the request is truly unclear.\n- NEVER say an image or video was made unless the tool result has ok:true. If it failed, say so plainly in one line and point to the setup button.\n- Attached images, PDFs and files are visible to you; analyse them carefully.");
+    L.push("Guidelines:\n- Answer directly and helpfully; match length to the question.\n- Use tools whenever they make the answer more correct or current: web_search for news/prices/facts you are unsure of (then cite 1-3 sources as markdown links), calculate/run_code for math, weather, currency, wikipedia, generate_image when asked to draw/create a picture.\n- Never invent facts, numbers, links or quotes. If unsure, search or say so.\n- If the user shares a lasting personal fact or asks you to remember something, call remember.\n- Images: call generate_image with a rich English prompt (pick a fitting style/aspect; count up to 4 for options). Videos: generate_video for a short realistic AI clip; make_story_video for stories, explainers or ads with narration (free); make_animation for wishes, quotes, status videos (free & unlimited, made on the phone). Ask nothing first unless the request is truly unclear.\n- NEVER say an image or video was made unless the tool result has ok:true. If it failed, say so plainly in one line and point to the setup button.\n- Attached images, PDFs and files are visible to you; analyse them carefully.");
     if (conv.agent) {
       L.push("AGENT MODE is ON. For tasks that need several steps: first write a very short plan (1-3 lines), then use tools one step at a time, check each result, fix problems yourself, and finish with a clear summary of what was done. " +
         "Phone tools (alarm, timer, calendar, call, SMS, email, maps, links) open the relevant app for the user to confirm. Files are saved to Download/Shathi. " +
@@ -932,8 +951,13 @@
         $("b", r).innerHTML = esc(title) + (extra || ""); $("small", r).textContent = sub || "";
         r.onclick = function () { close(); onPick(ref); }; g.appendChild(r); return r;
       };
+      var tg = document.createElement("label"); tg.className = "row"; tg.style.cssText = "border:1px solid var(--line);border-radius:14px;margin:4px 0 0";
+      tg.innerHTML = '<span class="rt"><b>শুধু ফ্রি মডেল দেখাও</b><small>পেইড মডেল লুকিয়ে রাখবে, যাতে ভুলে টাকা না কাটে</small></span><span class="switch"><input type="checkbox"><span></span></span>';
+      var tgi = $("input", tg); tgi.checked = !!S.settings.onlyFree;
+      tgi.onchange = function () { S.settings.onlyFree = tgi.checked; saveSettings(); close(); pickModel(selected, onPick, opts); };
+      b.appendChild(tg);
       var g0 = grp("প্রস্তাবিত");
-      row(g0, "✨", "var(--accent)", "সাথী অটো", "সবচেয়ে ভালো চালু মডেল নিজে বেছে নেয়; সমস্যা হলে অন্যটায় যায়", "auto");
+      row(g0, "✨", "var(--accent)", "সাথী অটো", "সেরা চালু " + (S.settings.autoPaid ? "" : "ফ্রি ") + "মডেল নিজে বেছে নেয়; সমস্যা হলে অন্যটায় যায়", "auto", S.settings.autoPaid ? "" : ' <span class="badge free">শুধু ফ্রি</span>');
       if (!opts.noCustom) {
         var gc = grp("আমার মডেল");
         S.settings.customModels.forEach(function (c) { row(gc, c.emoji || "🧬", c.color || "#7B61FF", c.name, (c.instructions || "").slice(0, 70), "c:" + c.id); });
@@ -943,17 +967,27 @@
       S.providers.usable().filter(function (p) { return !S.preset(p.preset).mediaOnly; }).sort(function (a, b2) { return ORDER.indexOf(a.preset) - ORDER.indexOf(b2.preset); }).forEach(function (p) {
         var pr = S.preset(p.preset), g = grp(p.name);
         var models = S.chatModels(p);
-        if (p.preset === "openrouter") models = models.filter(function (m) { return /:free$/.test(m); }).concat(models.filter(function (m) { return !/:free$/.test(m); }));
         if (!models.length && p.manualModel) models = [p.manualModel];
-        var shown = 0, more = null;
-        models.forEach(function (m) {
-          var r = row(g, pr.icon, pr.color, shortModel(m), m === S.pickModel(p) ? "এই প্রোভাইডারের সেরা পছন্দ" : m, "p:" + p.id + ":" + m,
-            /:free$/.test(m) || pr.tier === "free" ? '<span class="badge free">ফ্রি</span>' : pr.tier === "premium" ? '<span class="badge premium">পেইড</span>' : "");
-          if (++shown > 8) r.hidden = true;
+        var rank = { free: 0, limited: 1, local: 1, unknown: 2, paid: 3 };
+        models = models.slice().sort(function (a, c) { return rank[S.modelTier(p, a).tier] - rank[S.modelTier(p, c).tier]; });
+        var freeish = models.filter(function (m) { return S.modelTier(p, m).tier !== "paid"; }), paid = models.filter(function (m) { return S.modelTier(p, m).tier === "paid"; });
+        var showList = S.settings.onlyFree && pr.tier !== "premium" ? freeish : models;
+        var shown = 0, hiddenPaid = 0;
+        showList.forEach(function (m) {
+          var u = S.usage.of(p, m), tierX = S.modelTier(p, m);
+          var r = row(g, pr.icon, pr.color, shortModel(m), (m === S.pickModel(p) ? "★ সেরা পছন্দ · " : "") + tierX.note, "p:" + p.id + ":" + m, " " + S.tierBadge(p, m));
+          if (u.req || u.pct === 100) { var ud = document.createElement("div"); ud.className = "urow"; ud.innerHTML = S.usage.bar(u); $(".rt", r).appendChild(ud); }
+          shown++;
+          if (shown > 8 || (tierX.tier === "paid" && pr.tier !== "premium")) { r.hidden = true; if (tierX.tier === "paid") hiddenPaid++; }
         });
-        if (shown > 8) {
-          more = document.createElement("button"); more.className = "row"; more.innerHTML = '<span class="rt"><b style="color:var(--accent)">আরও ' + S.bnNum(shown - 8) + "টি মডেল দেখুন</b></span>";
+        var hiddenCount = $$(".row[hidden]", g).length;
+        if (hiddenCount) {
+          var more = document.createElement("button"); more.className = "row";
+          more.innerHTML = '<span class="rt"><b style="color:var(--accent)">আরও ' + S.bnNum(hiddenCount) + "টি মডেল দেখুন" + (hiddenPaid ? " (" + S.bnNum(hiddenPaid) + "টি পেইড)" : "") + "</b></span>";
           more.onclick = function () { $$(".row[hidden]", g).forEach(function (x) { x.hidden = false; }); more.remove(); }; g.appendChild(more);
+        }
+        if (S.settings.onlyFree && paid.length && pr.tier !== "premium") {
+          var pn = document.createElement("div"); pn.className = "row"; pn.innerHTML = '<span class="rt"><small>' + S.bnNum(paid.length) + "টি পেইড মডেল লুকানো আছে (\"শুধু ফ্রি\" চালু)</small></span>"; g.appendChild(pn);
         }
         var rf = document.createElement("button"); rf.className = "row"; rf.innerHTML = '<span class="rt"><small>↻ মডেলের তালিকা আপডেট করুন</small></span>';
         rf.onclick = function () { rf.querySelector("small").textContent = "আপডেট হচ্ছে…"; S.providers.refresh(p).then(function () { close(); pickModel(selected, onPick, opts); }, function (e) { rf.querySelector("small").textContent = "সমস্যা: " + e.message; }); };
@@ -1003,14 +1037,15 @@
     ui.page("AI প্রোভাইডার ও API", function (b, close, pg) {
       var draw = function () {
         b.innerHTML = "";
-        b.appendChild(el("div", { className: "help", html: "সাথী একসাথে অনেক AI ব্যবহার করতে পারে। <b>ফ্রি</b> প্রোভাইডারের key বিনামূল্যে পাওয়া যায়; <b>পেইড</b> গুলোতে ব্যবহার অনুযায়ী খরচ। key শুধু আপনার ফোনে থাকে।" }));
+        b.appendChild(el("div", { className: "help", html: "সাথী একসাথে অনেক AI ব্যবহার করতে পারে। <b>সীমিত ফ্রি</b> = টাকা লাগে না, কিন্তু দৈনিক সীমা আছে। <b>পেইড</b> = ব্যবহার অনুযায়ী টাকা কাটে। কোন মডেল কোনটা, তা মডেল বাছাইয়ের তালিকায় আলাদা করে লেখা আছে। key শুধু আপনার ফোনে থাকে।" }));
+        var ub = el("button", { className: "btn ghost", text: "📊 আজকের ব্যবহার ও লিমিট দেখুন" }); ub.onclick = function () { pages.usage(); }; b.appendChild(ub);
         var mine = S.settings.providers;
         if (mine.length) {
           b.appendChild(el("div", { className: "gtitle", text: "যুক্ত আছে" }));
           var g = el("div", { className: "group" }); b.appendChild(g);
           mine.forEach(function (p) {
             var pr = S.preset(p.preset), ok = p.enabled !== false && (p.key || pr.noKey);
-            navRow(g, pr.icon, pr.color, esc(p.name) + ' <span class="badge ' + pr.tier + '">' + (pr.tier === "free" ? "ফ্রি" : pr.tier === "premium" ? "পেইড" : "নিজের") + "</span>",
+            navRow(g, pr.icon, pr.color, esc(p.name) + " " + S.providerBadge(p),
               (ok ? "✓ চালু" : "বন্ধ") + (p.models && p.models.length ? " · " + S.bnNum(S.chatModels(p).length) + "টি মডেল" : "") + (p.working ? " · " + shortModel(p.working) : ""),
               function () { pages.providerEdit(p); });
           });
@@ -1030,6 +1065,9 @@
   };
 
   pages.providerEdit = function (p, presetId) {
+    if (!p && presetId && presetId !== "custom" && presetId !== "ollama") {
+      p = S.settings.providers.filter(function (x) { return x.preset === presetId; })[0] || null;
+    }
     var isNew = !p, pr = S.preset(p ? p.preset : presetId);
     ui.page(isNew ? pr.name + " যোগ করুন" : p.name, function (b, close) {
       b.appendChild(el("div", { className: "help", html: '<span class="badge ' + pr.tier + '" style="margin:0 6px 0 0">' + (pr.tier === "free" ? "ফ্রি" : pr.tier === "premium" ? "পেইড" : "নিজের") + "</span>" + esc(pr.note) }));
@@ -1089,10 +1127,11 @@
 
   pages.studio = function (tab) {
     ui.page("ছবি ও ভিডিও স্টুডিও", function (b, close) {
-      var state = { tab: tab || "image", style: "auto", aspect: "square", count: 1, smart: true, vmode: "story", vaspect: "portrait", scenes: 5, narration: true, music: true, dur: 6 };
+      var state = { tab: tab || "image", asrc: "text", effect: "sparkle", adur: 10, style: "auto", aspect: "square", count: 1, smart: true, vmode: "story", vaspect: "portrait", scenes: 5, narration: true, music: true, dur: 6 };
       var draw = function () {
         b.innerHTML = "";
-        segRow(b, "", [["image", "🎨 ছবি"], ["video", "🎬 ভিডিও"]], state.tab, function (v) { state.tab = v; draw(); });
+        segRow(b, "", [["image", "🎨 ছবি"], ["video", "🎬 ভিডিও"], ["anim", "✨ অ্যানিমেশন"]], state.tab, function (v) { state.tab = v; draw(); });
+        if (state.tab === "anim") { drawAnim(); return; }
         var ib = S.media.imageBackends(), vb = S.media.videoBackends();
         var info = el("div", { className: "help" });
         if (state.tab === "image") info.innerHTML = ib.length ? "ছবি বানাবে: <b>" + ib.map(function (x) { return esc(x.name); }).join(" → ") + "</b> (একটায় না হলে পরেরটায়)" : "";
@@ -1174,7 +1213,95 @@
           }
         }
       };
+      function drawAnim() {
+        b.appendChild(el("div", { className: "help", html: "<b>সম্পূর্ণ ফ্রি, সীমাহীন:</b> ফোনেই তৈরি হয়, কোনো সার্ভিস বা লিমিট লাগে না। শুভেচ্ছা, উক্তি, বিজ্ঞাপন, স্ট্যাটাস ভিডিওর জন্য দারুণ।" }));
+        segRow(b, "উৎস", [["text", "🔤 শুধু লেখা"], ["photo", "🖼 নিজের ছবি"], ["ai", "🎨 AI ছবি"]], state.asrc, function (v) { state.asrc = v; drawAgain(); });
+        var fileIn = null;
+        if (state.asrc === "photo") {
+          fileIn = el("input", { type: "file", accept: "image/*" }); field(b, "ছবি বেছে নিন", fileIn);
+          fileIn.onchange = function () { var f = fileIn.files[0]; if (!f) return; var r = new FileReader(); r.onload = function () { state.photo = r.result; S.toast("ছবি নেওয়া হয়েছে"); }; r.readAsDataURL(f); };
+        }
+        var ai = null;
+        if (state.asrc === "ai") { ai = field(b, "কী ছবি?", el("input", { value: state.aiIdea || "", placeholder: "যেমন: চাঁদনি রাতে শাপলা ফুলের পুকুর" })); ai.oninput = function () { state.aiIdea = ai.value; }; }
+        var tx = field(b, "লেখা (প্রতি লাইনে একটা বাক্য, একে একে আসবে)", el("textarea", { value: state.animText || "", placeholder: "শুভ জন্মদিন, প্রিয় আম্মু!\nতোমার হাসিই আমাদের আলো\nভালোবাসি অনেক ❤" }));
+        tx.oninput = function () { state.animText = tx.value; };
+        var aiTx = btn(b, "✨ AI দিয়ে লেখা বানাও", "ghost", function () {
+          var topic = (tx.value || state.aiIdea || "").trim(); if (!topic) { S.toast("কী বিষয়ে লিখবো, ঘরে একটু লিখুন"); return; }
+          aiTx.disabled = true; aiTx.textContent = "লিখছি…";
+          S.media.ask("Write 3-5 short, beautiful lines (max 8 words each) for an animated video about: \"" + topic + "\". Same language as the topic (Bangla if Bangla/Banglish). One line per row, no numbering, no quotes.")
+            .then(function (t) { tx.value = t.trim(); state.animText = tx.value; }, function (e) { S.toast(e.message); })
+            .then(function () { aiTx.disabled = false; aiTx.textContent = "✨ AI দিয়ে লেখা বানাও"; });
+        });
+        var chips = el("div", { className: "emo styles" });
+        S.media.EFFECTS.forEach(function (f) { var x = el("button", { text: f[1] }); if (f[0] === state.effect) x.className = "on"; x.onclick = function () { state.effect = f[0]; $$("button", chips).forEach(function (y) { y.className = ""; }); x.className = "on"; }; chips.appendChild(x); });
+        field(b, "ইফেক্ট", chips);
+        segRow(b, "দৈর্ঘ্য", [[6, "৬ সে."], [10, "১০ সে."], [15, "১৫ সে."], [30, "৩০ সে."]], state.adur, function (v) { state.adur = v; });
+        segRow(b, "আকার", [["portrait", "▯ স্ট্যাটাস/রিলস"], ["square", "◻ বর্গ"], ["landscape", "▭ চওড়া"]], state.vaspect, function (v) { state.vaspect = v; });
+        var g3 = el("div", { className: "group" }); b.appendChild(g3);
+        switchRow(g3, "🎵 হালকা মিউজিক", "", state.music, function (v) { state.music = v; });
+        var go = btn(b, "✨ অ্যানিমেশন বানান", "primary", function () {
+          var lines = (tx.value || "").split("\n");
+          var getImg = state.asrc === "photo" ? Promise.resolve(state.photo || null)
+            : state.asrc === "ai" ? (state.aiIdea ? S.media.enhance(state.aiIdea, "auto").then(function (pr) { return S.media.makeImage(pr, { aspect: state.vaspect }); }).then(function (r) { return r.src; }) : Promise.reject(new Error("কী ছবি লাগবে লিখুন")))
+            : Promise.resolve(null);
+          if (state.asrc === "photo" && !state.photo) { S.toast("আগে একটা ছবি বেছে নিন"); return; }
+          if (state.asrc === "text" && !lines.join("").trim()) { S.toast("কিছু লেখা দিন"); return; }
+          go.disabled = true; if (A) A.keepAwake(true);
+          var out2 = el("div", { className: "studio-out" }); var old = $(".studio-out", b); if (old) old.remove(); b.appendChild(out2);
+          var pg2 = function (t, f) { out2.innerHTML = '<div class="prog"><div class="pt"><span class="spin"></span> ' + esc(t) + '</div><div class="pbar"><i style="width:' + Math.round((f || 0) * 100) + '%"></i></div><div class="help">অ্যাপ খোলা রাখুন</div></div>'; };
+          pg2(state.asrc === "ai" ? "🎨 ছবি আঁকছি…" : "✨ অ্যানিমেশন বানাচ্ছি…", 0.05);
+          getImg.then(function (img) {
+            return S.media.animate({ image: img, lines: lines, effect: state.effect, duration: state.adur, aspect: state.vaspect, music: state.music,
+              onProg: function (f) { pg2("✨ অ্যানিমেশন বানাচ্ছি… " + S.bnNum(Math.round(f * 100)) + "%", f); } });
+          }).then(function (v) {
+            if (v.blob) VIDEO_BLOBS[v.uri || v.path] = URL.createObjectURL(v.blob);
+            out2.innerHTML = ""; out2.appendChild(videoCard({ uri: v.uri, path: v.path, title: "অ্যানিমেশন", mime: v.mime.split(";")[0] }));
+          }, function (e) { out2.innerHTML = ""; out2.appendChild(el("div", { className: "errbox", text: e.message })); })
+            .then(function () { go.disabled = false; if (A) A.keepAwake(false); });
+        });
+      }
+      function drawAgain() { draw(); }
       draw();
+    });
+  };
+
+  pages.usage = function () {
+    ui.page("ব্যবহার ও লিমিট", function (b) {
+      var draw = function () {
+        b.innerHTML = "";
+        b.appendChild(el("div", { className: "help", html: "আজ কোন মডেল কতটা ব্যবহার হয়েছে। % দেখায় দৈনিক ফ্রি সীমার কত অংশ শেষ। <b>আনুমানিক</b> লেখা থাকলে প্রোভাইডার আসল সংখ্যা জানায় না, সাধারণ সীমা ধরে হিসাব। সীমা শেষ হলে সাথী নিজেই অন্য মডেলে চলে যায়। নতুন দিনে আবার পুরো সীমা পাওয়া যায়।" }));
+        var all = S.usage.all(), byP = {};
+        Object.keys(all).forEach(function (k) { var e = all[k]; (byP[e.pid] = byP[e.pid] || []).push(e); });
+        var any = false;
+        S.settings.providers.forEach(function (p) {
+          var list = byP[p.id] || [], pr = S.preset(p.preset);
+          if (!list.length && p.preset !== "openrouter") return;
+          any = true;
+          b.appendChild(el("div", { className: "gtitle", html: esc(p.name) + " " + S.providerBadge(p) }));
+          var g = el("div", { className: "group" }); b.appendChild(g);
+          if (p.preset === "openrouter" && p.orInfo) {
+            var oi = p.orInfo;
+            g.appendChild(el("div", { className: "mem", html: "<span>অ্যাকাউন্ট: " + (oi.freeTier ? "ফ্রি টিয়ার — ফ্রি মডেলে দিনে ৫০টি অনুরোধ" : "ক্রেডিট আছে — ফ্রি মডেলে দিনে ১০০০টি") +
+              (oi.usage != null ? "<br><small>মোট খরচ: $" + (+oi.usage).toFixed(4) + (oi.limit != null ? " / সীমা $" + oi.limit : "") + "</small>" : "") + "</span>" }));
+          }
+          list.sort(function (a, c) { return c.req - a.req; }).forEach(function (e) {
+            var u = S.usage.of(p, e.model), t = e.kind === "image" ? "🎨" : e.kind === "video" ? "🎬" : e.kind === "stt" ? "🎤" : "💬";
+            var r = el("div", { className: "mem" });
+            r.innerHTML = '<span><b style="font-weight:500">' + t + " " + esc(shortModel(e.model)) + "</b> " + (e.kind === "chat" ? S.tierBadge(p, e.model) : "") +
+              '<br><small style="color:var(--muted)">আজ ' + S.bnNum(e.req) + "টি অনুরোধ" + (e.ok < e.req ? " (" + S.bnNum(e.req - e.ok) + "টি ব্যর্থ)" : "") +
+              (e.tin + e.tout ? " · " + S.bnNum((Math.round((e.tin + e.tout) / 100) / 10)) + "k টোকেন" : "") + (u.limitText ? " · " + esc(u.limitText) : "") + "</small>" +
+              (u.pct != null ? '<div class="urow">' + S.usage.bar(u) + "</div>" : "") + "</span>";
+            g.appendChild(r);
+          });
+          if (!list.length) g.appendChild(el("div", { className: "empty", text: "আজ এখনো ব্যবহার হয়নি" }));
+        });
+        if (!any) b.appendChild(el("div", { className: "empty", text: "আজ এখনো কোনো AI ব্যবহার হয়নি" }));
+        var orp = S.providers.find("openrouter");
+        if (orp) btn(b, "↻ OpenRouter অ্যাকাউন্টের তথ্য আনুন", "ghost", function () { S.usage.refreshOpenRouter(orp).then(draw); });
+        btn(b, "আজকের হিসাব মুছুন", "ghost", function () { S.usage.reset(); draw(); });
+      };
+      draw();
+      var orp = S.providers.find("openrouter"); if (orp && (!orp.orInfo || Date.now() - orp.orInfo.at > 36e5)) S.usage.refreshOpenRouter(orp).then(draw);
     });
   };
 
@@ -1292,6 +1419,10 @@
       switchRow(g2, "উত্তর নিজে থেকে পড়ে শোনাবে", "প্রতিটা উত্তর শেষে", st.voice.autoSpeak, function (v) { st.voice.autoSpeak = v; saveSettings(); });
       btn(vb, "🔊 ভয়েস পরীক্ষা করুন", "ghost", function () { ui.speakMsg("আসসালামু আলাইকুম! আমি সাথী। আমার কথা কি পরিষ্কার শোনা যাচ্ছে?"); });
       btn(vb, "⚙️ ফোনের ভয়েস সেটিংস / বাংলা ভয়েস ইনস্টল", "ghost", function () { if (A) A.installTtsData(); });
+
+      var gp = el("div", { className: "group" }); b.appendChild(gp);
+      switchRow(gp, "সাথী অটো পেইড মডেলও ব্যবহার করবে", "বন্ধ থাকলে অটো শুধু ফ্রি/সীমিত ফ্রি মডেল ব্যবহার করে — ভুলে টাকা কাটবে না", st.autoPaid, function (v) { st.autoPaid = v; saveSettings(); });
+      switchRow(gp, "মডেলের তালিকায় শুধু ফ্রি দেখাও", "", st.onlyFree, function (v) { st.onlyFree = v; saveSettings(); });
 
       b.appendChild(el("div", { className: "gtitle", text: "এজেন্ট" }));
       var g3 = el("div", { className: "group" }); b.appendChild(g3);

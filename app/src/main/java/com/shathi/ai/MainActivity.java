@@ -485,6 +485,22 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String limitHeaders(HttpURLConnection c) {
+        try {
+            JSONObject o = new JSONObject();
+            Map<String, List<String>> hs = c.getHeaderFields();
+            for (Map.Entry<String, List<String>> e : hs.entrySet()) {
+                String k = e.getKey();
+                if (k == null) continue;
+                String kl = k.toLowerCase(Locale.US);
+                if (kl.contains("ratelimit") || kl.equals("retry-after")) o.put(kl, e.getValue().get(0));
+            }
+            return o.length() == 0 ? null : o.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     // ---------------- scanning ----------------
     private static class Scan {
         Map<String, Long> folders = new HashMap<String, Long>();
@@ -728,6 +744,8 @@ public class MainActivity extends Activity {
                         }
                         int code = c.getResponseCode();
                         js("__net", id, "status", String.valueOf(code));
+                        String lh = limitHeaders(c);
+                        if (lh != null) js("__net", id, "headers", lh);
                         InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
                         if (in == null) {
                             js("__net", id, "end", String.valueOf(code));
@@ -822,6 +840,8 @@ public class MainActivity extends Activity {
                         os.close();
                         int code = c.getResponseCode();
                         js("__net", id, "status", String.valueOf(code));
+                        String lh = limitHeaders(c);
+                        if (lh != null) js("__net", id, "headers", lh);
                         InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
                         js("__net", id, "body", in == null ? "" : readAll(in));
                         js("__net", id, "end", String.valueOf(code));
@@ -898,6 +918,8 @@ public class MainActivity extends Activity {
                         }
                         int code = c.getResponseCode();
                         js("__net", id, "status", String.valueOf(code));
+                        String lh = limitHeaders(c);
+                        if (lh != null) js("__net", id, "headers", lh);
                         String ct = c.getContentType();
                         js("__net", id, "ctype", ct == null ? "" : ct);
                         InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();

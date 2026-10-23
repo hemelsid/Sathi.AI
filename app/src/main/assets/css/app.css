@@ -270,3 +270,9 @@ svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.9;stroke
 .viewer .vb{display:flex;gap:10px;margin-top:14px}
 .viewer .vb button{color:#fff;border:1px solid rgba(255,255,255,.35);border-radius:12px;padding:8px 16px}
 .imgs img{cursor:zoom-in}
+
+.urow{display:flex;align-items:center;gap:8px;margin-top:5px}
+.ubar{flex:1;max-width:160px;height:6px;border-radius:3px;background:var(--surface2);overflow:hidden;display:inline-block}
+.ubar i{display:block;height:100%}
+.ubar-txt{font-size:12px;color:var(--muted)}
+.row .rt small{white-space:normal}

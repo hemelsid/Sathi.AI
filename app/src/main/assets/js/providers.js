@@ -122,6 +122,19 @@
     var url = p.preset === "github" ? S.preset("github").listUrl : base(p) + "/models";
     return S.getJSON(url, authHeaders(p)).then(function (d) {
       var arr = Array.isArray(d) ? d : (d.data || d.models || []);
+      p.modelInfo = {};
+      arr.forEach(function (m) {
+        if (!m || typeof m !== "object") return;
+        var id = m.id || m.name, info = {};
+        if (m.pricing) {
+          var vals = ["prompt", "completion", "request", "image", "input", "output"].map(function (k) { return m.pricing[k]; }).filter(function (v) { return v != null && v !== ""; });
+          if (vals.length) info.free = vals.every(function (v) { return +v === 0; });
+        }
+        if (m.paid_only === true || m.paidOnly === true) info.free = false;
+        if (typeof m.tier === "string") info.free = /anonymous|seed|free/i.test(m.tier);
+        if (m.context_length) info.ctx = m.context_length;
+        p.modelInfo[id] = info;
+      });
       if (p.preset === "openrouter") {
         p.toolModels = arr.filter(function (m) { return (m.supported_parameters || []).indexOf("tools") >= 0; }).map(function (m) { return m.id; });
         arr.sort(function (a, b) { return ((b.id.indexOf(":free") > 0) - (a.id.indexOf(":free") > 0)); });
@@ -272,6 +285,7 @@
       onChunk: S.sse(function (ev) { parse(ev, acc); if (o.onText) o.onText(acc.text); }) });
     if (o.signal) o.signal.handle = h;
     return h.promise.then(function (r) {
+      if (S.usage) S.usage.record(o.p, o.model, "chat", { ok: r.status < 400, status: r.status, headers: r.headers, usage: acc.usage, body: r.status >= 400 ? r.body : "" });
       if (o.signal && o.signal.cancelled) { acc.cancelled = true; return acc; }
       if (r.status >= 400) throw classify(r.status, r.body, o.p);
       if (r.status === 0 && !acc.text && !acc.calls.length) throw ProviderError(o.p.name + ": সংযোগ বিচ্ছিন্ন।", "network", 0);
@@ -302,6 +316,7 @@
     var url = base(p) + "/models/" + o.model + ":streamGenerateContent?alt=sse";
     return run(o, { url: url, headers: authHeaders(p), body: body }, function (ev, acc) {
       if (ev.error) { acc.error = ev.error; return; }
+      if (ev.usageMetadata) acc.usage = { input: ev.usageMetadata.promptTokenCount || 0, output: (ev.usageMetadata.candidatesTokenCount || 0) + (ev.usageMetadata.thoughtsTokenCount || 0) };
       var c = (ev.candidates || [])[0]; if (!c) return;
       if (c.groundingMetadata && c.groundingMetadata.groundingChunks) {
         acc.sources = (acc.sources || []).concat(c.groundingMetadata.groundingChunks.map(function (g) { return g.web ? { title: g.web.title, url: g.web.uri } : null; }).filter(Boolean));
@@ -333,10 +348,12 @@
     if (o.tools && o.tools.length) body.tools = o.tools.map(function (t) {
       return { type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } };
     });
+    if (/^(openai|groq|openrouter|deepseek|together|xai|cerebras)$/.test(p.preset)) body.stream_options = { include_usage: true };
     var url = base(p) + "/chat/completions";
     var tc = {};
     return run(o, { url: url, headers: authHeaders(p), body: body }, function (ev, acc) {
       if (ev.error) { acc.error = ev.error; return; }
+      if (ev.usage) acc.usage = { input: ev.usage.prompt_tokens || 0, output: ev.usage.completion_tokens || 0 };
       var ch = (ev.choices || [])[0]; if (!ch) return;
       var d = ch.delta || ch.message || {};
       if (typeof d.content === "string") acc.text += d.content;
@@ -369,6 +386,8 @@
     var blocks = {};
     return run(o, { url: base(p) + "/messages", headers: authHeaders(p), body: body }, function (ev, acc) {
       if (ev.type === "error") { acc.error = ev.error; return; }
+      if (ev.type === "message_start" && ev.message && ev.message.usage) acc.usage = { input: ev.message.usage.input_tokens || 0, output: 0 };
+      if (ev.type === "message_delta" && ev.usage) acc.usage = { input: (acc.usage || {}).input || 0, output: ev.usage.output_tokens || 0 };
       if (ev.type === "content_block_start") {
         var b = ev.content_block || {};
         blocks[ev.index] = { type: b.type, id: b.id, name: b.name, json: "" };

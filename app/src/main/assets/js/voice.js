@@ -70,6 +70,7 @@
       return S.multipart(t.p.base.replace(/\/+$/, "") + "/audio/transcriptions", S.authHeaders(t.p), fields, b64, "voice.m4a", mime)
         .then(function (r) {
           var d = S.J(r.body, {});
+          if (S.usage) S.usage.record(t.p, t.model, "stt", { ok: r.status < 400, status: r.status, headers: r.headers, body: r.status >= 400 ? r.body : "" });
           if (r.status >= 400) {
             // fall back to Gemini if available
             var g = S.providers.find("gemini");

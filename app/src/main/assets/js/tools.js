@@ -163,6 +163,22 @@
             .then(function (r) { r.ai_video_error = e.message; r.note = "AI video service unavailable (" + e.message + "), so a free narrated story video was made instead. Tell the user this honestly."; return r; });
         });
       } },
+    { name: "make_animation", group: "chat", label: "✨ অ্যানিমেশন বানাচ্ছে",
+      description: "FREE & unlimited (made on the phone): short animated video with lines of text appearing one by one over an animated background or an AI picture, with effects (sparkle, fireflies, snow, rain, hearts, confetti, light, bubbles, zoom, pan) and soft music. Best for wishes, quotes, status videos, simple ads. ONLY claim success if ok:true.",
+      parameters: obj({ lines: { type: "array", items: { type: "string" }, description: "2-6 short lines (max 8 words each) in the user's language" },
+        effect: str("sparkle | fireflies | snow | rain | hearts | confetti | light | bubbles | zoom | pan"), image_prompt: str("optional English prompt for a background picture"),
+        duration: num("seconds 6-30, default 10"), aspect: str("portrait | square | landscape") }, ["lines"]),
+      run: function (a, ctx) {
+        var st = function (t) { ctx && ctx.progress && ctx.progress(t); };
+        var img = a.image_prompt && S.media.imageBackends().length ? (st("🎨 পটভূমির ছবি আঁকছি…"), S.media.makeImage(a.image_prompt, { aspect: a.aspect || "portrait" }).then(function (r) { return r.src; }, function () { return null; })) : Promise.resolve(null);
+        return img.then(function (src) {
+          return S.media.animate({ image: src, lines: a.lines || [], effect: a.effect || "sparkle", duration: a.duration || 10, aspect: a.aspect || "portrait",
+            onProg: function (f) { st("✨ অ্যানিমেশন বানাচ্ছি… " + S.bnNum(Math.round(f * 100)) + "%"); } });
+        }).then(function (v) {
+          if (ctx && ctx.addVideo) ctx.addVideo({ uri: v.uri, path: v.path, blob: v.blob, title: (a.lines || [""])[0], mime: v.mime.split(";")[0] });
+          return { ok: true, kind: "animation", seconds: Math.round(v.duration), saved_to: v.path };
+        }, function (e) { return { ok: false, error: e.message }; });
+      } },
     { name: "make_story_video", group: "chat", label: "🎞 স্টোরি ভিডিও বানাচ্ছে",
       description: "Make a FREE narrated video on the phone: writes a script, draws a picture for each scene, adds Bangla voice narration, captions, music and smooth motion. Great for stories, explainers, reels, birthday wishes, ads, lessons. Takes 1-3 minutes. ONLY claim success if ok:true.",
       parameters: obj({ topic: str("What the video is about (any language), with any details the user gave"), scenes: num("3-10, default 5"),

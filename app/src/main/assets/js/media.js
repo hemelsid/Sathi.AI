@@ -170,9 +170,10 @@
     var go = function (i) {
       if (i >= backs.length) { var e2 = new Error(errs.join("; ")); e2.code = "all_failed"; return Promise.reject(e2); }
       if (opts.onStatus) opts.onStatus(backs[i].name + " দিয়ে আঁকছি…");
+      var rec = function (ok, msg) { if (S.usage) S.usage.record(backs[i].p, backs[i].name, "image", { ok: ok, units: backs[i].id === "cloudflare" && ok ? 43 : 0, status: ok ? 200 : (/লিমিট|limit/.test(msg || "") ? 429 : 400), body: msg || "" }); };
       return IMG[backs[i].id](backs[i], full, wh[0], wh[1], opts.quality)
-        .then(function (src) { return loadImg(src, 90000).then(function () { return { src: src, provider: backs[i].name }; }); })
-        .catch(function (err) { errs.push(err.message); return go(i + 1); });
+        .then(function (src) { return loadImg(src, 90000).then(function () { rec(true); return { src: src, provider: backs[i].name }; }); })
+        .catch(function (err) { rec(false, err.message); errs.push(err.message); return go(i + 1); });
     };
     return go(0);
   };
@@ -260,8 +261,8 @@
     if (!backs.length) { var e = new Error("AI ভিডিওর জন্য Pollinations (ফ্রি key), Gemini Veo বা OpenAI Sora (পেইড) দরকার।"); e.code = "no_video_provider"; return Promise.reject(e); }
     var go = function (i) {
       if (i >= backs.length) { var e2 = new Error(errs.join("; ")); e2.code = "all_failed"; return Promise.reject(e2); }
-      return VID[backs[i].id](backs[i], prompt, o, status).then(function (r) { r.provider = backs[i].name; return r; })
-        .catch(function (err) { errs.push(err.message); return go(i + 1); });
+      return VID[backs[i].id](backs[i], prompt, o, status).then(function (r) { r.provider = backs[i].name; if (S.usage) S.usage.record(backs[i].p, backs[i].name, "video", { ok: true }); return r; })
+        .catch(function (err) { if (S.usage) S.usage.record(backs[i].p, backs[i].name, "video", { ok: false, body: err.message }); errs.push(err.message); return go(i + 1); });
     };
     return go(0);
   };
@@ -334,6 +335,120 @@
             .then(function (sv) { out.uri = sv.uri; out.path = sv.path; return out; }, function () { return out; });
         });
       });
+  };
+
+  /* ---------------- on-device animations (free, unlimited) ---------------- */
+  M.EFFECTS = [
+    ["zoom", "🔍 ধীরে জুম"], ["pan", "↔ প্যান"], ["sparkle", "✨ ঝিকিমিকি"], ["fireflies", "🌟 জোনাকি"], ["snow", "❄ তুষার"],
+    ["rain", "🌧 বৃষ্টি"], ["hearts", "💖 হার্ট"], ["confetti", "🎉 কনফেটি"], ["light", "🌅 আলোর রেখা"], ["bubbles", "🫧 বুদবুদ"]
+  ];
+  function Particles(kind, Wd, Ht) {
+    var n = { sparkle: 70, fireflies: 45, snow: 140, rain: 220, hearts: 28, confetti: 120, bubbles: 40, light: 0, zoom: 0, pan: 0 }[kind] || 0, ps = [];
+    var rnd = function (a, b) { return a + Math.random() * (b - a); };
+    var colors = ["#FFD166", "#EF476F", "#06D6A0", "#118AB2", "#C77DFF", "#FF9F1C"];
+    for (var i = 0; i < n; i++) ps.push({ x: rnd(0, Wd), y: rnd(0, Ht), s: rnd(0.4, 1.4), v: rnd(0.4, 1.4), ph: rnd(0, 6.28), c: colors[i % colors.length], r: rnd(0, 6.28) });
+    return function (ctx, t, dt) {
+      ps.forEach(function (p) {
+        ctx.save();
+        if (kind === "snow") { p.y += 40 * p.v * dt; p.x += Math.sin(t + p.ph) * 12 * dt; ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.beginPath(); ctx.arc(p.x, p.y, 2.5 * p.s + 1, 0, 7); ctx.fill(); }
+        else if (kind === "rain") { p.y += 900 * p.v * dt; p.x -= 120 * dt; ctx.strokeStyle = "rgba(200,220,255,.45)"; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x - 6, p.y + 22 * p.s); ctx.stroke(); }
+        else if (kind === "sparkle") { var a = Math.max(0, Math.sin(t * 3 * p.v + p.ph)); ctx.globalAlpha = a; ctx.fillStyle = "#FFF6D5"; ctx.translate(p.x, p.y); ctx.rotate(t + p.ph);
+          var z = 7 * p.s; ctx.beginPath(); ctx.moveTo(0, -z); ctx.quadraticCurveTo(0, 0, z, 0); ctx.quadraticCurveTo(0, 0, 0, z); ctx.quadraticCurveTo(0, 0, -z, 0); ctx.quadraticCurveTo(0, 0, 0, -z); ctx.fill(); }
+        else if (kind === "fireflies") { p.x += Math.cos(t * 0.7 + p.ph) * 20 * dt; p.y += Math.sin(t * 0.9 + p.ph) * 16 * dt; var g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 14 * p.s);
+          var al = 0.5 + 0.5 * Math.sin(t * 2 + p.ph); g.addColorStop(0, "rgba(255,240,150," + al + ")"); g.addColorStop(1, "rgba(255,200,50,0)"); ctx.fillStyle = g; ctx.fillRect(p.x - 20, p.y - 20, 40, 40); }
+        else if (kind === "hearts") { p.y -= 50 * p.v * dt; p.x += Math.sin(t + p.ph) * 18 * dt; ctx.globalAlpha = 0.85; ctx.fillStyle = "#FF4D8D"; ctx.translate(p.x, p.y); ctx.scale(p.s * 1.4, p.s * 1.4);
+          ctx.beginPath(); ctx.moveTo(0, 4); ctx.bezierCurveTo(-10, -4, -6, -12, 0, -6); ctx.bezierCurveTo(6, -12, 10, -4, 0, 4); ctx.fill(); }
+        else if (kind === "confetti") { p.y += 160 * p.v * dt; p.r += 3 * dt; ctx.fillStyle = p.c; ctx.translate(p.x + Math.sin(t * 2 + p.ph) * 10, p.y); ctx.rotate(p.r); ctx.fillRect(-5 * p.s, -3, 10 * p.s, 6); }
+        else if (kind === "bubbles") { p.y -= 60 * p.v * dt; p.x += Math.sin(t + p.ph) * 14 * dt; ctx.strokeStyle = "rgba(255,255,255,.55)"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(p.x, p.y, 10 * p.s + 4, 0, 7); ctx.stroke(); }
+        ctx.restore();
+        if (p.y > Ht + 30) { p.y = -30; p.x = Math.random() * Wd; }
+        if (p.y < -40) { p.y = Ht + 30; p.x = Math.random() * Wd; }
+        if (p.x < -40) p.x = Wd + 30; if (p.x > Wd + 40) p.x = -30;
+      });
+      if (kind === "light") {
+        for (var k = 0; k < 4; k++) {
+          var x = ((t * 60 + k * Wd / 3) % (Wd * 1.6)) - Wd * 0.3, g2 = ctx.createLinearGradient(x, 0, x + Wd * 0.25, Ht);
+          g2.addColorStop(0, "rgba(255,230,180,0)"); g2.addColorStop(0.5, "rgba(255,230,180,.16)"); g2.addColorStop(1, "rgba(255,230,180,0)");
+          ctx.fillStyle = g2; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + Wd * 0.12, 0); ctx.lineTo(x + Wd * 0.4, Ht); ctx.lineTo(x + Wd * 0.25, Ht); ctx.fill();
+        }
+      }
+    };
+  }
+  /** Record any canvas animation with optional music. draw(ctx, t, dt) */
+  function recordCanvas(Wd, Ht, total, draw, music, onProg) {
+    var mime = pickMime(); if (!mime) return Promise.reject(new Error("এই ফোনে ভিডিও রেকর্ড করা যাচ্ছে না"));
+    var cv = document.createElement("canvas"); cv.width = Wd; cv.height = Ht; var ctx = cv.getContext("2d");
+    var AC = W.AudioContext || W.webkitAudioContext, ac = new AC(), dest = ac.createMediaStreamDestination();
+    if (music !== false) {
+      var g = ac.createGain(); g.gain.value = 0.0001; g.connect(dest);
+      var ch = [[261.63, 329.63, 392], [220, 277.18, 329.63], [174.61, 220, 261.63], [196, 246.94, 293.66]], now = ac.currentTime;
+      var os = [0, 1, 2].map(function (k) { var o = ac.createOscillator(); o.type = k ? "sine" : "triangle"; o.frequency.value = ch[0][k]; o.connect(g); return o; });
+      for (var ci = 0, ct = 0; ct < total; ci++, ct += 3) os.forEach(function (o, k) { o.frequency.setTargetAtTime(ch[ci % 4][k], now + ct, 0.5); });
+      g.gain.setTargetAtTime(0.05, now + 0.1, 0.6); g.gain.setTargetAtTime(0.0001, now + total - 1, 0.35);
+      os.forEach(function (o) { o.start(now); o.stop(now + total + 0.4); });
+    }
+    var stream = cv.captureStream(30); dest.stream.getAudioTracks().forEach(function (tr) { stream.addTrack(tr); });
+    var rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 5000000 }), chunks = [];
+    rec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+    return new Promise(function (res, rej) {
+      var t0 = ac.currentTime + 0.1, last = 0, timer;
+      rec.onstop = function () { clearInterval(timer); ac.close(); res({ blob: new Blob(chunks, { type: mime }), mime: mime, duration: total }); };
+      rec.onerror = function () { clearInterval(timer); rej(new Error("রেকর্ডিং ব্যর্থ")); };
+      draw(ctx, 0, 0); rec.start(1000);
+      timer = setInterval(function () {
+        var t = Math.max(0, ac.currentTime - t0), dt = Math.min(0.1, t - last); last = t;
+        draw(ctx, t, dt); if (onProg) onProg(Math.min(1, t / total));
+        if (t >= total) { clearInterval(timer); setTimeout(function () { try { rec.stop(); } catch (x) { rej(x); } }, 200); }
+      }, 1000 / 30);
+    });
+  }
+  /**
+   * Animation: photo (image dataURL) or text-only.
+   * o: {image, lines[], effect, duration, aspect, title, music, onProg}
+   */
+  M.animate = function (o) {
+    var dims = o.aspect === "landscape" ? [1280, 720] : o.aspect === "square" ? [1080, 1080] : [720, 1280];
+    var Wd = dims[0], Ht = dims[1], total = Math.max(4, Math.min(30, o.duration || 8)), font = "'Noto Sans Bengali','Hind Siliguri',sans-serif";
+    var lines = (o.lines || []).map(function (l) { return String(l).trim(); }).filter(Boolean).slice(0, 8);
+    var parts = Particles(o.effect || "sparkle", Wd, Ht), hue0 = Math.random() * 360;
+    return (o.image ? loadImg(o.image) : Promise.resolve(null)).then(function (im) {
+      var per = lines.length ? (total - 1.2) / lines.length : total;
+      return recordCanvas(Wd, Ht, total, function (ctx, t, dt) {
+        var p = t / total;
+        if (im) {
+          var eff = o.effect, s = eff === "zoom" ? 1.0 + 0.22 * p : 1.1 + 0.04 * Math.sin(t * 0.6);
+          var base = Math.max(Wd / im.naturalWidth, Ht / im.naturalHeight) * s, dw = im.naturalWidth * base, dh = im.naturalHeight * base;
+          var dx = (Wd - dw) / 2 + (eff === "pan" ? (p - 0.5) * (dw - Wd) * 0.9 : Math.sin(t * 0.4) * 12), dy = (Ht - dh) / 2 + Math.cos(t * 0.35) * 10;
+          ctx.drawImage(im, dx, dy, dw, dh);
+          if (lines.length) { var gg = ctx.createLinearGradient(0, Ht * 0.45, 0, Ht); gg.addColorStop(0, "rgba(0,0,0,0)"); gg.addColorStop(1, "rgba(0,0,0,.65)"); ctx.fillStyle = gg; ctx.fillRect(0, Ht * 0.45, Wd, Ht * 0.55); }
+        } else {
+          var h = (hue0 + t * 12) % 360, g = ctx.createLinearGradient(Wd * Math.sin(t * 0.2), 0, Wd, Ht);
+          g.addColorStop(0, "hsl(" + h + ",70%,30%)"); g.addColorStop(1, "hsl(" + ((h + 70) % 360) + ",75%,14%)");
+          ctx.fillStyle = g; ctx.fillRect(0, 0, Wd, Ht);
+        }
+        parts(ctx, t, dt);
+        // text: each line rises and fades in, stays, previous lines remain dimmer
+        if (lines.length) {
+          var fs = Math.round((im ? 0.058 : 0.075) * Math.min(Wd, Ht * 0.75)), lh = fs * 1.45;
+          ctx.font = "700 " + fs + "px " + font; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          var shown = [];
+          lines.forEach(function (l, i) { var st = 0.4 + i * per; if (t >= st) shown.push({ l: l, a: Math.min(1, (t - st) / 0.6), i: i }); });
+          var wrapped = [];
+          shown.forEach(function (x) { wrap(ctx, x.l, Wd * 0.84).forEach(function (w) { wrapped.push({ w: w, a: x.a, i: x.i }); }); });
+          var startY = im ? Ht - Ht * 0.08 - (wrapped.length - 1) * lh : Ht / 2 - (wrapped.length - 1) * lh / 2;
+          wrapped.forEach(function (x, k) {
+            var newest = x.i === shown.length - 1, rise = (1 - x.a) * 30;
+            ctx.globalAlpha = x.a * (newest || !im ? 1 : 0.8); ctx.fillStyle = "#fff"; ctx.shadowColor = "rgba(0,0,0,.6)"; ctx.shadowBlur = 14;
+            ctx.fillText(x.w, Wd / 2, startY + k * lh + rise);
+          });
+          ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+        }
+        if (t > total - 0.8) { ctx.fillStyle = "rgba(0,0,0," + Math.min(1, (t - (total - 0.8)) / 0.8) + ")"; ctx.fillRect(0, 0, Wd, Ht); }
+      }, o.music, o.onProg);
+    }).then(function (out) {
+      return S.saveBlob(out.blob, "shathi-anim-" + Date.now() + (/mp4/.test(out.mime) ? ".mp4" : ".webm"), out.mime.split(";")[0])
+        .then(function (sv) { out.uri = sv.uri; out.path = sv.path; return out; }, function () { return out; });
+    });
   };
 
   /* ---------------- renderer (canvas + WebAudio -> MediaRecorder) ---------------- */
